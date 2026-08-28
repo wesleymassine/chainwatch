@@ -1,0 +1,23 @@
+# Single-node Redpanda: Kafka API compatible, no ZooKeeper, one container.
+# Enough to exercise the producer, the acks and the compacted checkpoint topic.
+services:
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    container_name: chainwatch-redpanda
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --overprovisioned
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://localhost:9092
+    ports:
+      - "9092:9092"
+      - "9644:9644"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

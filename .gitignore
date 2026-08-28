@@ -1,0 +1,35 @@
+# binaries
+/bin/
+/chainwatch
+*.exe
+
+# secrets and local config
+.env
+.env.local
+
+# generated dataset (500k addresses, ~25 MB) — reproducible via `make dataset`
+/testdata/addresses.csv
+/testdata/addresses.json
+
+# test and profiling output
+coverage.out
+coverage.html
+*.test
+*.prof
+*.pprof
+cpu.out
+mem.out
+
+# submission bundle
+/dist/
+*_go_interview.zip
+
+# Claude Code — local tooling, never part of the deliverable
+.claude/
+CLAUDE.md
+
+# internal working notes (brief, requirements matrix, commit plan) — not shipped
+notes/
+
+# macOS
+.DS_Store
