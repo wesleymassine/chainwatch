@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,7 +12,7 @@ import (
 func TestGenerate(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "addresses.csv")
 	const n = 1000
-	if err := generate(path, n, 1); err != nil {
+	if err := writeFile(path, n, 1); err != nil {
 		t.Fatal(err)
 	}
 
@@ -54,7 +55,7 @@ func TestGenerateIsReproducible(t *testing.T) {
 	dir := t.TempDir()
 	a, b := filepath.Join(dir, "a.csv"), filepath.Join(dir, "b.csv")
 	for _, p := range []string{a, b} {
-		if err := generate(p, 5000, 42); err != nil {
+		if err := writeFile(p, 5000, 42); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -68,5 +69,16 @@ func TestGenerateIsReproducible(t *testing.T) {
 	}
 	if string(got) != string(want) {
 		t.Fatal("same seed produced a different dataset")
+	}
+}
+
+func BenchmarkGenerate(b *testing.B) {
+	const n = 500_000
+	b.SetBytes(int64(n))
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if err := generate(io.Discard, n, 1); err != nil {
+			b.Fatal(err)
+		}
 	}
 }

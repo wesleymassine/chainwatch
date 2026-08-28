@@ -12,10 +12,12 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"strconv"
 )
 
 func main() {
@@ -27,14 +29,14 @@ func main() {
 	if *n < len(seeds) {
 		log.Fatalf("-n must be at least %d, the number of seed addresses", len(seeds))
 	}
-	if err := generate(*out, *n, *seed); err != nil {
+	if err := writeFile(*out, *n, *seed); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("wrote %d addresses to %s (%d seeded, %d random)\n",
 		*n, *out, len(seeds), *n-len(seeds))
 }
 
-func generate(path string, n int, seed uint64) error {
+func writeFile(path string, n int, seed uint64) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -45,6 +47,13 @@ func generate(path string, n int, seed uint64) error {
 	defer f.Close()
 
 	w := bufio.NewWriterSize(f, 1<<20)
+	if err := generate(w, n, seed); err != nil {
+		return err
+	}
+	return w.Flush()
+}
+
+func generate(w io.Writer, n int, seed uint64) error {
 	fmt.Fprintln(w, "userId,address")
 	for i, addr := range seeds {
 		fmt.Fprintf(w, "%d,%s\n", i+1, addr)
@@ -60,12 +69,15 @@ func generate(path string, n int, seed uint64) error {
 		binary.LittleEndian.PutUint64(addr[8:16], rng.Uint64())
 		binary.LittleEndian.PutUint32(addr[16:20], rng.Uint32())
 
-		line = append(line[:0], fmt.Sprintf("%d,0x", i+1)...)
+		// Built by appending into a reused buffer: at 500k rows, a Sprintf
+		// per line would allocate a string every iteration for nothing.
+		line = strconv.AppendInt(line[:0], int64(i+1), 10)
+		line = append(line, ',', '0', 'x')
 		line = hex.AppendEncode(line, addr[:])
 		line = append(line, '\n')
 		if _, err := w.Write(line); err != nil {
 			return err
 		}
 	}
-	return w.Flush()
+	return nil
 }
