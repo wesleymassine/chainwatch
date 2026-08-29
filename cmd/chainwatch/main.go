@@ -40,9 +40,9 @@ func run(log *slog.Logger) error {
 		topic   = env("KAFKA_TOPIC", "tx-events")
 		dataset = env("ADDRESSES_FILE", "testdata/addresses.csv")
 	)
-	poll, err := time.ParseDuration(env("POLL_INTERVAL", "3s"))
+	opts, err := options()
 	if err != nil {
-		return fmt.Errorf("POLL_INTERVAL: %w", err)
+		return err
 	}
 
 	file, err := os.Open(dataset)
@@ -72,9 +72,29 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	log.Info("starting", "rpc", rpcURL, "topic", topic, "from", from, "poll", poll.String())
+	log.Info("starting", "rpc", rpcURL, "topic", topic, "from", from,
+		"poll", opts.Poll.String(), "workers", opts.Workers, "batch", opts.BatchSize)
 
-	return pipeline.New(client, matcher.New(watched), pub, poll, log).Run(ctx, from)
+	return pipeline.New(client, matcher.New(watched), pub, opts, log).Run(ctx, from)
+}
+
+// options reads the tuning knobs. The defaults are the mainnet numbers measured
+// in notes/03-rpc-probe.md: a batch of 20 stays well under the endpoint's 24 MB
+// response cap, and eight workers reach roughly 100 blocks/s during catch-up.
+func options() (pipeline.Options, error) {
+	poll, err := time.ParseDuration(env("POLL_INTERVAL", "3s"))
+	if err != nil {
+		return pipeline.Options{}, fmt.Errorf("POLL_INTERVAL: %w", err)
+	}
+	workers, err := strconv.Atoi(env("WORKERS", "8"))
+	if err != nil || workers < 1 {
+		return pipeline.Options{}, fmt.Errorf("WORKERS must be a positive number, got %q", env("WORKERS", "8"))
+	}
+	batch, err := strconv.Atoi(env("BATCH_SIZE", "20"))
+	if err != nil || batch < 1 {
+		return pipeline.Options{}, fmt.Errorf("BATCH_SIZE must be a positive number, got %q", env("BATCH_SIZE", "20"))
+	}
+	return pipeline.Options{Poll: poll, Workers: workers, BatchSize: batch}, nil
 }
 
 // startBlock resolves START_BLOCK, which is either "latest" or a block number.
