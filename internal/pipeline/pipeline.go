@@ -76,6 +76,6 @@ func (p *Pipeline) processBlock(ctx context.Context, number uint64) error {
 
 	p.log.Info("block processed",
 		"number", block.Number, "txs", len(block.Txs), "events", len(events))
-		
+
 	return nil
 }

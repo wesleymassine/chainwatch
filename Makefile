@@ -2,7 +2,7 @@ GO      ?= go
 BINARY  ?= bin/chainwatch
 COMPOSE ?= docker compose
 
-.PHONY: build run test test-race vet fmt tidy up down dataset dist clean
+.PHONY: build run test test-race vet fmt fmt-check tidy up down dataset dist clean
 
 build:
 	$(GO) build -o $(BINARY) ./cmd/chainwatch
@@ -22,6 +22,10 @@ vet:
 
 fmt:
 	$(GO) fmt ./...
+
+# What CI enforces: fails instead of rewriting.
+fmt-check:
+	@test -z "$$(gofmt -l ./cmd ./internal)" || { gofmt -l ./cmd ./internal; exit 1; }
 
 tidy:
 	$(GO) mod tidy
