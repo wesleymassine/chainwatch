@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/wesleymassine/chainwatch/internal/addresses"
+	"github.com/wesleymassine/chainwatch/internal/checkpoint"
 	"github.com/wesleymassine/chainwatch/internal/ethrpc"
 	"github.com/wesleymassine/chainwatch/internal/matcher"
 	"github.com/wesleymassine/chainwatch/internal/pipeline"
@@ -35,10 +36,11 @@ func run(log *slog.Logger) error {
 	defer stop()
 
 	var (
-		rpcURL  = env("RPC_URL", "https://ethereum-rpc.publicnode.com")
-		brokers = strings.Split(env("KAFKA_BROKERS", "localhost:9092"), ",")
-		topic   = env("KAFKA_TOPIC", "tx-events")
-		dataset = env("ADDRESSES_FILE", "testdata/addresses.csv")
+		rpcURL      = env("RPC_URL", "https://ethereum-rpc.publicnode.com")
+		brokers     = strings.Split(env("KAFKA_BROKERS", "localhost:9092"), ",")
+		topic       = env("KAFKA_TOPIC", "tx-events")
+		checkpoints = env("KAFKA_CHECKPOINT_TOPIC", "tx-checkpoints")
+		dataset     = env("ADDRESSES_FILE", "testdata/addresses.csv")
 	)
 	opts, err := options()
 	if err != nil {
@@ -57,8 +59,14 @@ func run(log *slog.Logger) error {
 	log.Info("loaded watched addresses", "count", watched.Len(), "file", dataset)
 
 	// Created here rather than by a setup step, so that starting the service is
-	// the only thing anyone has to do.
-	if err := publisher.EnsureTopics(ctx, brokers, publisher.TopicSpec{Name: topic, Partitions: 6}); err != nil {
+	// the only thing anyone has to do. The checkpoint topic must be compacted:
+	// under retention its one meaningful record would eventually be deleted.
+	err = publisher.EnsureTopics(ctx, brokers,
+		publisher.TopicSpec{Name: topic, Partitions: 6},
+		publisher.TopicSpec{Name: checkpoints, Partitions: 1,
+			Configs: map[string]string{"cleanup.policy": "compact"}},
+	)
+	if err != nil {
 		return err
 	}
 	pub, err := publisher.NewKafka(brokers, topic)
@@ -68,14 +76,24 @@ func run(log *slog.Logger) error {
 	defer pub.Close()
 
 	client := ethrpc.New(rpcURL, log)
+	chainID, err := client.ChainID(ctx)
+	if err != nil {
+		return fmt.Errorf("identifying the chain: %w", err)
+	}
+	store, err := checkpoint.NewKafka(brokers, checkpoints, chainID)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
 	from, err := startBlock(ctx, client, env("START_BLOCK", "latest"))
 	if err != nil {
 		return err
 	}
-	log.Info("starting", "rpc", rpcURL, "topic", topic, "from", from,
+	log.Info("starting", "rpc", rpcURL, "chainId", chainID, "topic", topic, "fallback", from,
 		"poll", opts.Poll.String(), "workers", opts.Workers, "batch", opts.BatchSize)
 
-	return pipeline.New(client, matcher.New(watched), pub, opts, log).Run(ctx, from)
+	return pipeline.New(client, matcher.New(watched), pub, store, opts, log).Run(ctx, from)
 }
 
 // options reads the tuning knobs. The defaults are the mainnet numbers measured
@@ -98,6 +116,7 @@ func options() (pipeline.Options, error) {
 }
 
 // startBlock resolves START_BLOCK, which is either "latest" or a block number.
+// It is only a fallback: a stored checkpoint takes precedence over it.
 func startBlock(ctx context.Context, client *ethrpc.Client, value string) (uint64, error) {
 	if value == "latest" {
 		head, err := client.BlockNumber(ctx)

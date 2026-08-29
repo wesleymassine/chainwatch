@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wesleymassine/chainwatch/internal/checkpoint"
 	"github.com/wesleymassine/chainwatch/internal/ethrpc"
 	"github.com/wesleymassine/chainwatch/internal/matcher"
 	"github.com/wesleymassine/chainwatch/internal/publisher"
@@ -24,19 +25,25 @@ type Options struct {
 }
 
 type Pipeline struct {
-	client    *ethrpc.Client
-	matcher   *matcher.Matcher
-	publisher publisher.Publisher
-	opts      Options
-	log       *slog.Logger
+	client     *ethrpc.Client
+	matcher    *matcher.Matcher
+	publisher  publisher.Publisher
+	checkpoint checkpoint.Store
+	opts       Options
+	log        *slog.Logger
 }
 
-func New(c *ethrpc.Client, m *matcher.Matcher, p publisher.Publisher, opts Options, log *slog.Logger) *Pipeline {
-	return &Pipeline{client: c, matcher: m, publisher: p, opts: opts, log: log}
+func New(c *ethrpc.Client, m *matcher.Matcher, pub publisher.Publisher, cp checkpoint.Store, opts Options, log *slog.Logger) *Pipeline {
+	return &Pipeline{client: c, matcher: m, publisher: pub, checkpoint: cp, opts: opts, log: log}
 }
 
-// Run processes blocks from `next` onwards until ctx is cancelled.
-func (p *Pipeline) Run(ctx context.Context, next uint64) error {
+// Run resumes from the stored checkpoint, or from fallback if there is none,
+// and processes blocks until ctx is cancelled.
+func (p *Pipeline) Run(ctx context.Context, fallback uint64) error {
+	next, err := p.resume(ctx, fallback)
+	if err != nil {
+		return err
+	}
 	for {
 		head, err := p.client.BlockNumber(ctx)
 		if err != nil {
@@ -54,6 +61,25 @@ func (p *Pipeline) Run(ctx context.Context, next uint64) error {
 			return ctx.Err()
 		}
 	}
+}
+
+// resume decides which block to start from.
+//
+// A stored checkpoint always wins over configuration. START_BLOCK says where to
+// begin when there is nothing to resume; obeying it on a restart would replay
+// from the wrong place, or worse, jump to the head and skip everything in
+// between.
+func (p *Pipeline) resume(ctx context.Context, fallback uint64) (uint64, error) {
+	cp, found, err := p.checkpoint.Load(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("loading checkpoint: %w", err)
+	}
+	if !found {
+		p.log.Info("no checkpoint found, starting fresh", "from", fallback)
+		return fallback, nil
+	}
+	p.log.Info("resuming from checkpoint", "block", cp.Block, "hash", cp.Hash, "from", cp.Block+1)
+	return cp.Block + 1, nil
 }
 
 // catchUp fetches [from, to] with a pool of workers and publishes it in order.
@@ -150,17 +176,35 @@ func (p *Pipeline) feed(ctx context.Context, jobs chan<- []uint64, from, to uint
 	}
 }
 
-// publish walks a chunk in order. The order of these lines is the at-least-once
-// guarantee: a block is not done until Publish has returned, and Publish does
-// not return until the broker has acknowledged.
+// publish sends a whole chunk, then records that it is done.
+//
+// The order of these three steps is the at-least-once guarantee, and it only
+// reads correctly in this direction: match, publish and wait for the broker's
+// acknowledgement, and only then move the checkpoint. Saving first would mean an
+// interruption in between leaves the checkpoint claiming work that was never
+// published, and those transactions would never be looked at again.
+//
+// The whole chunk goes in one Publish because the ack barrier and the checkpoint
+// must have the same granularity. Paying for twenty acknowledgements to protect
+// a window that is already twenty blocks wide buys nothing but latency.
 func (p *Pipeline) publish(ctx context.Context, blocks []*ethrpc.Block) error {
+	first, last := blocks[0], blocks[len(blocks)-1]
+
+	var events []matcher.Event
+	txs := 0
 	for _, block := range blocks {
-		events := p.matcher.Block(block)
-		if err := p.publisher.Publish(ctx, events); err != nil {
-			return fmt.Errorf("publishing block %d: %w", block.Number, err)
-		}
-		p.log.Info("block processed",
-			"number", block.Number, "txs", len(block.Txs), "events", len(events))
+		events = append(events, p.matcher.Block(block)...)
+		txs += len(block.Txs)
 	}
+
+	if err := p.publisher.Publish(ctx, events); err != nil {
+		return fmt.Errorf("publishing blocks %d-%d: %w", first.Number, last.Number, err)
+	}
+	if err := p.checkpoint.Save(ctx, checkpoint.Checkpoint{Block: last.Number, Hash: last.Hash}); err != nil {
+		return err
+	}
+
+	p.log.Info("blocks processed",
+		"from", first.Number, "to", last.Number, "txs", txs, "events", len(events))
 	return nil
 }

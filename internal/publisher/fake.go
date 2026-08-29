@@ -13,6 +13,7 @@ import (
 type Fake struct {
 	mu        sync.Mutex
 	events    []matcher.Event
+	calls     int
 	failAfter int
 	failErr   error
 	closed    bool
@@ -43,8 +44,17 @@ func (f *Fake) Publish(ctx context.Context, events []matcher.Event) error {
 	if f.failErr != nil && len(f.events) >= f.failAfter {
 		return f.failErr
 	}
+	f.calls++
 	f.events = append(f.events, events...)
 	return nil
+}
+
+// Calls is how many times Publish succeeded. One call per chunk is the property
+// that keeps the acknowledgement barrier as wide as the checkpoint window.
+func (f *Fake) Calls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
 }
 
 // Events returns a copy of everything published so far.

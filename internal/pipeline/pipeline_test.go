@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/wesleymassine/chainwatch/internal/addresses"
+	"github.com/wesleymassine/chainwatch/internal/checkpoint"
 	"github.com/wesleymassine/chainwatch/internal/ethrpc"
 	"github.com/wesleymassine/chainwatch/internal/matcher"
 	"github.com/wesleymassine/chainwatch/internal/publisher"
@@ -99,7 +100,7 @@ func (n *node) blocksAsked() []uint64 {
 
 func discard() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
-func newPipeline(t *testing.T, n *node, pub publisher.Publisher, opts Options) *Pipeline {
+func newPipeline(t *testing.T, n *node, pub publisher.Publisher, opts Options) (*Pipeline, *checkpoint.Fake) {
 	t.Helper()
 	set, err := addresses.Load(strings.NewReader("userId,address\n7," + watchedAddr + "\n"))
 	if err != nil {
@@ -107,7 +108,8 @@ func newPipeline(t *testing.T, n *node, pub publisher.Publisher, opts Options) *
 	}
 	// A poll interval long enough that Run never gets a second round: every test
 	// here is about the first pass over a fixed range.
-	return New(n.start(t), matcher.New(set), pub, opts, discard())
+	cp := checkpoint.NewFake()
+	return New(n.start(t), matcher.New(set), pub, cp, opts, discard()), cp
 }
 
 // sequential is the shape the ordering assertions rely on: one worker, one block
@@ -128,7 +130,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 func TestRunPublishesMatchesUpToHead(t *testing.T) {
 	n := &node{head: 104, watchedIn: map[uint64]bool{101: true, 103: true}}
 	fake := publisher.NewFake()
-	p := newPipeline(t, n, fake, sequential)
+	p, _ := newPipeline(t, n, fake, sequential)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -161,8 +163,9 @@ func TestRunStopsAtTheBlockItCannotPublish(t *testing.T) {
 	fake := publisher.NewFake()
 	fake.FailAfter(2, errors.New("broker gone"))
 
-	err := newPipeline(t, n, fake, sequential).Run(context.Background(), 100)
-	if err == nil || !strings.Contains(err.Error(), "publishing block 102") {
+	p, cp := newPipeline(t, n, fake, sequential)
+	err := p.Run(context.Background(), 100)
+	if err == nil || !strings.Contains(err.Error(), "publishing blocks 102") {
 		t.Fatalf("Run() = %v, want it to name the block it stopped on", err)
 	}
 	// 103 and 104 must never have been fetched: moving on would leave a hole
@@ -173,13 +176,20 @@ func TestRunStopsAtTheBlockItCannotPublish(t *testing.T) {
 	if got := len(fake.Events()); got != 2 {
 		t.Errorf("published %d events, want the 2 from before the failure", got)
 	}
+	// The checkpoint must not have moved past what was actually published: a
+	// restart has to come back to 102, not step over it.
+	saved := cp.Saved()
+	if len(saved) != 2 || saved[len(saved)-1].Block != 101 {
+		t.Errorf("checkpoints saved = %+v, want the last one to be block 101", saved)
+	}
 }
 
 func TestRunStopsOnCancellation(t *testing.T) {
 	n := &node{head: 100, watchedIn: map[uint64]bool{}}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := newPipeline(t, n, publisher.NewFake(), sequential).Run(ctx, 100); !errors.Is(err, context.Canceled) {
+	p, _ := newPipeline(t, n, publisher.NewFake(), sequential)
+	if err := p.Run(ctx, 100); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() = %v, want context.Canceled", err)
 	}
 }
@@ -187,7 +197,7 @@ func TestRunStopsOnCancellation(t *testing.T) {
 func TestRunPublishesNothingWhenNoAddressMatches(t *testing.T) {
 	n := &node{head: 102, watchedIn: map[uint64]bool{}}
 	fake := publisher.NewFake()
-	p := newPipeline(t, n, fake, sequential)
+	p, _ := newPipeline(t, n, fake, sequential)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -229,7 +239,7 @@ func TestConcurrentFetchingStillPublishesInOrder(t *testing.T) {
 		delay:     map[uint64]time.Duration{100: 300 * time.Millisecond},
 	}
 	fake := publisher.NewFake()
-	p := newPipeline(t, n, fake, Options{Poll: time.Hour, Workers: 4, BatchSize: 1})
+	p, _ := newPipeline(t, n, fake, Options{Poll: time.Hour, Workers: 4, BatchSize: 1})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -260,7 +270,7 @@ func TestWorkersFetchInParallel(t *testing.T) {
 	}
 	n := &node{head: 107, watchedIn: watched, delay: delay}
 	fake := publisher.NewFake()
-	p := newPipeline(t, n, fake, Options{Poll: time.Hour, Workers: 4, BatchSize: 1})
+	p, _ := newPipeline(t, n, fake, Options{Poll: time.Hour, Workers: 4, BatchSize: 1})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -283,5 +293,90 @@ func TestWorkersFetchInParallel(t *testing.T) {
 	}
 	if peak > 4 {
 		t.Errorf("peak concurrent fetches = %d, want at most the 4 workers configured", peak)
+	}
+}
+
+// A restart must come back to where it left off, not to where configuration
+// says to start. Getting this backwards means either replaying from scratch or,
+// far worse, jumping to the head and never looking at the gap.
+func TestResumesFromTheCheckpointRatherThanTheFallback(t *testing.T) {
+	watched := map[uint64]bool{}
+	for n := uint64(100); n <= 105; n++ {
+		watched[n] = true
+	}
+	n := &node{head: 105, watchedIn: watched}
+	fake := publisher.NewFake()
+	p, cp := newPipeline(t, n, fake, sequential)
+	cp.Seed(checkpoint.Checkpoint{Block: 102, Hash: "0x66"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- p.Run(ctx, 100) }() // fallback says 100, checkpoint says 103
+
+	waitFor(t, "the remaining blocks", func() bool { return len(fake.Events()) == 3 })
+	cancel()
+	<-done
+
+	if want := []uint64{103, 104, 105}; !equal(n.blocksAsked(), want) {
+		t.Errorf("blocks asked = %v, want %v — 100-102 were already published", n.blocksAsked(), want)
+	}
+}
+
+// One acknowledgement per chunk, not per block. The barrier and the checkpoint
+// window are the same thing, so paying for one per block buys only latency.
+func TestPublishesOneBatchPerChunk(t *testing.T) {
+	watched := map[uint64]bool{}
+	for n := uint64(100); n <= 119; n++ {
+		watched[n] = true
+	}
+	n := &node{head: 119, watchedIn: watched}
+	fake := publisher.NewFake()
+	p, cp := newPipeline(t, n, fake, Options{Poll: time.Hour, Workers: 2, BatchSize: 5})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- p.Run(ctx, 100) }()
+
+	waitFor(t, "all twenty blocks", func() bool { return len(fake.Events()) == 20 })
+	cancel()
+	<-done
+
+	// 20 blocks in chunks of 5: four calls, not twenty.
+	if got := fake.Calls(); got != 4 {
+		t.Errorf("Publish called %d times for 20 blocks in chunks of 5, want 4", got)
+	}
+	saved := cp.Saved()
+	if len(saved) != 4 {
+		t.Fatalf("saved %d checkpoints, want one per chunk", len(saved))
+	}
+	// Each checkpoint names the last block of its chunk, and they advance in order.
+	for i, want := range []uint64{104, 109, 114, 119} {
+		if saved[i].Block != want {
+			t.Errorf("checkpoint %d = block %d, want %d", i, saved[i].Block, want)
+		}
+	}
+}
+
+// The checkpoint may only move after the broker has acknowledged. If it moved
+// first, an interruption in between would leave it claiming work that was never
+// published, and those transactions would never be revisited.
+func TestCheckpointDoesNotMoveWhenPublishFails(t *testing.T) {
+	watched := map[uint64]bool{}
+	for n := uint64(100); n <= 109; n++ {
+		watched[n] = true
+	}
+	n := &node{head: 109, watchedIn: watched}
+	fake := publisher.NewFake()
+	fake.FailAfter(5, errors.New("broker gone"))
+	p, cp := newPipeline(t, n, fake, Options{Poll: time.Hour, Workers: 1, BatchSize: 5})
+
+	if err := p.Run(context.Background(), 100); err == nil {
+		t.Fatal("want an error")
+	}
+	saved := cp.Saved()
+	if len(saved) != 1 || saved[0].Block != 104 {
+		t.Fatalf("checkpoints = %+v, want only the first chunk (block 104)", saved)
 	}
 }
