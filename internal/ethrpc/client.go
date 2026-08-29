@@ -23,10 +23,15 @@ import (
 const maxBatchRounds = 5
 
 type Client struct {
-	url   string
-	http  *http.Client
+	url  string
+	http *http.Client
+	log  *slog.Logger
+
 	agent string
-	log   *slog.Logger
+	// Kept on the client rather than as a constant so tests can shorten it:
+	// proving that rate limiting is retried past the failure budget otherwise
+	// means a test that really waits several seconds.
+	backoffBase time.Duration
 }
 
 // New returns a client for one endpoint. A nil logger falls back to the default.
@@ -35,9 +40,10 @@ func New(url string, log *slog.Logger) *Client {
 		log = slog.Default()
 	}
 	return &Client{
-		url:   url,
-		agent: "chainwatch/0.1",
-		log:   log,
+		url:         url,
+		agent:       "chainwatch/0.1",
+		log:         log,
+		backoffBase: 100 * time.Millisecond,
 		http: &http.Client{
 			Timeout: 60 * time.Second,
 			Transport: &http.Transport{

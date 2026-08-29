@@ -158,15 +158,53 @@ func TestPostRetriesOnRateLimit(t *testing.T) {
 	// The rate limiting has to be visible. We never slow down to avoid it, but
 	// pretending it did not happen would hide a real property of the endpoint.
 	logs := node.logs.String()
-	if !strings.Contains(logs, "rate_limited=true") || !strings.Contains(logs, "status=429") {
+	if !strings.Contains(logs, "rate limited, retrying") {
 		t.Errorf("429 was not logged; got:\n%s", logs)
 	}
 }
 
+// The bug this guards against killed the service on Arbitrum: eight workers
+// fetching batches of a hundred drew a storm of 429s in under a second, the
+// finite retry budget ran out, and the process exited having published nothing.
+//
+// A 429 is the endpoint asking us to come back, not a request that failed, so it
+// must not spend the budget that genuine failures spend.
+func TestRateLimitingDoesNotExhaustTheFailureBudget(t *testing.T) {
+	const limited = maxHTTPFailures + 3
+	node := &fakeNode{status: http.StatusTooManyRequests, okAfter: limited}
+	client := node.server(t)
+	client.backoffBase = time.Millisecond
+
+	got, err := client.Blocks(context.Background(), numbers(100, 101))
+	if err != nil {
+		t.Fatalf("gave up after %d rate limits: %v", limited, err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d blocks, want 2", len(got))
+	}
+}
+
+// Genuine failures still have to end. Retrying a broken endpoint forever would
+// hide it behind a service that looks alive and makes no progress.
+func TestServerErrorsStillGiveUp(t *testing.T) {
+	node := &fakeNode{status: http.StatusInternalServerError, okAfter: 1000}
+	client := node.server(t)
+	client.backoffBase = time.Millisecond
+
+	_, err := client.Blocks(context.Background(), numbers(100, 101))
+	if err == nil {
+		t.Fatal("want an error rather than retrying a broken endpoint forever")
+	}
+	if !strings.Contains(err.Error(), "failures") {
+		t.Errorf("error = %v, want it to say the budget ran out", err)
+	}
+}
+
 func TestBackoffIsJittered(t *testing.T) {
+	client := New("http://unused", discardLogger())
 	seen := map[time.Duration]bool{}
 	for i := 0; i < 50; i++ {
-		d := backoff(3)
+		d := client.backoff(3)
 		if d < 200*time.Millisecond || d >= 400*time.Millisecond {
 			t.Fatalf("backoff(3) = %v, want it within [200ms, 400ms)", d)
 		}

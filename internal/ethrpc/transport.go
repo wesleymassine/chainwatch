@@ -11,10 +11,12 @@ import (
 	"time"
 )
 
-// How many times one HTTP request is attempted before giving up. Separate from
-// maxBatchRounds: one counts transport failures, the other counts incomplete
+// How many transport failures one HTTP request tolerates before giving up.
+// Separate from maxBatchRounds: one counts failures, the other counts incomplete
 // batch responses, and they have no reason to move together.
-const maxHTTPAttempts = 5
+//
+// Note what this does not bound: rate limiting. See post.
+const maxHTTPFailures = 5
 
 type request struct {
 	JSONRPC string `json:"jsonrpc"`
@@ -66,22 +68,29 @@ func (c *Client) call(ctx context.Context, reqs []request) ([]response, error) {
 	return res, nil
 }
 
-// post retries the failures that are worth retrying.
+// post retries the failures that are worth retrying, and treats rate limiting as
+// something other than a failure.
 //
 // The brief says to assume unrestricted usage and not to slow down for rate
-// limits, and this does not: the steady state is never throttled. But public
-// endpoints do answer 429 under load, and treating that as fatal would drop
-// blocks. Losing data is the one outcome that is not allowed, so a 429 is
-// logged and the request is made again.
+// limits, and nothing here does: the steady state is never throttled, and no
+// concurrency is given up to stay under a limit.
 //
-// Logging it rather than swallowing it is the point: the rate limiting is real
-// and visible in the output, without ever being worked around.
+// But a 429 is the endpoint asking us to come back, not a request that failed.
+// Giving up on one drops blocks, and dropping blocks is the single outcome that
+// is not allowed — so 429s are retried for as long as the caller's context
+// lives, and only genuine failures spend the budget. Arbitrum's public endpoint
+// makes this concrete: eight workers fetching batches of a hundred draw a storm
+// of 429s within a second, and a finite budget there kills the service on the
+// very L2 it is required to support.
+//
+// They are logged rather than swallowed, so the rate limiting stays visible in
+// the output without ever being worked around.
 func (c *Client) post(ctx context.Context, body []byte) ([]byte, error) {
 	var lastErr error
-	for attempt := 0; attempt < maxHTTPAttempts; attempt++ {
+	for attempt, failures := 0, 0; failures < maxHTTPFailures; attempt++ {
 		if attempt > 0 {
 			select {
-			case <-time.After(backoff(attempt)):
+			case <-time.After(c.backoff(attempt)):
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			}
@@ -98,19 +107,28 @@ func (c *Client) post(ctx context.Context, body []byte) ([]byte, error) {
 		resp, err := c.http.Do(req)
 		if err != nil {
 			lastErr = err
+			failures++
 			continue
 		}
 		out, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
 			lastErr = err
+			failures++
 			continue
 		}
-		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+		if resp.StatusCode == http.StatusTooManyRequests {
 			lastErr = fmt.Errorf("http %d: %s", resp.StatusCode, snippet(out))
+			// Deliberately does not spend the failure budget.
+			c.log.Warn("rate limited, retrying",
+				"attempt", attempt+1, "backoff", c.backoff(attempt+1).String())
+			continue
+		}
+		if resp.StatusCode >= 500 {
+			lastErr = fmt.Errorf("http %d: %s", resp.StatusCode, snippet(out))
+			failures++
 			c.log.Warn("rpc request retried",
-				"status", resp.StatusCode, "attempt", attempt+1, "of", maxHTTPAttempts,
-				"rate_limited", resp.StatusCode == http.StatusTooManyRequests)
+				"status", resp.StatusCode, "failure", failures, "of", maxHTTPFailures)
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
@@ -118,18 +136,22 @@ func (c *Client) post(ctx context.Context, body []byte) ([]byte, error) {
 		}
 		return out, nil
 	}
-	return nil, fmt.Errorf("after %d attempts: %w", maxHTTPAttempts, lastErr)
+	return nil, fmt.Errorf("after %d failures: %w", maxHTTPFailures, lastErr)
 }
 
 // backoff grows the pause between attempts and jitters it. Without the jitter a
 // pool of workers that all hit the same rate limit would retry in lockstep and
 // trip it again together.
-func backoff(attempt int) time.Duration {
-	const (
-		base     = 100 * time.Millisecond
-		maxDelay = 2 * time.Second
-	)
-	d := base << (attempt - 1)
+func (c *Client) backoff(attempt int) time.Duration {
+	base := c.backoffBase
+	const maxDelay = 2 * time.Second
+	// Clamped before shifting: with rate limiting retried indefinitely, the
+	// attempt count is unbounded and a bare shift would overflow into nonsense.
+	shift := attempt - 1
+	if shift > 8 {
+		shift = 8
+	}
+	d := base << shift
 	if d > maxDelay {
 		d = maxDelay
 	}
