@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math/big"
 	"strconv"
-	"strings"
 
 	"github.com/wesleymassine/chainwatch/internal/addresses"
 )
@@ -86,7 +85,7 @@ func (t *Tx) UnmarshalJSON(data []byte) error {
 	// negative amount and travel on looking perfectly valid. The value comes
 	// from a public node we do not control, which is exactly the input worth
 	// distrusting.
-	value, ok := new(big.Int).SetString(strings.TrimPrefix(raw.Value, "0x"), 16)
+	value, ok := new(big.Int).SetString(trimHexPrefix(raw.Value), 16)
 	if !ok || value.Sign() < 0 {
 		return fmt.Errorf("tx %s: bad value %q", raw.Hash, raw.Value)
 	}
@@ -96,5 +95,12 @@ func (t *Tx) UnmarshalJSON(data []byte) error {
 }
 
 func parseHexUint64(s string) (uint64, error) {
-	return strconv.ParseUint(strings.TrimPrefix(s, "0x"), 16, 64)
+	return strconv.ParseUint(trimHexPrefix(s), 16, 64)
+}
+
+func trimHexPrefix(s string) string {
+	if len(s) >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X') {
+		return s[2:]
+	}
+	return s
 }

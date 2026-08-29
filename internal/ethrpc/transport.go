@@ -126,20 +126,20 @@ func (c *Client) post(ctx context.Context, body []byte) ([]byte, error) {
 // trip it again together.
 func backoff(attempt int) time.Duration {
 	const (
-		base = 100 * time.Millisecond
-		max  = 2 * time.Second
+		base     = 100 * time.Millisecond
+		maxDelay = 2 * time.Second
 	)
 	d := base << (attempt - 1)
-	if d > max {
-		d = max
+	if d > maxDelay {
+		d = maxDelay
 	}
 	return d/2 + rand.N(d/2)
 }
 
 func snippet(b []byte) string {
-	const max = 120
-	if len(b) > max {
-		return string(b[:max]) + "…"
+	const limit = 120
+	if len(b) > limit {
+		return string(b[:limit]) + "…"
 	}
 	return string(b)
 }

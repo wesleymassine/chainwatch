@@ -311,3 +311,16 @@ func TestDecodeClearsRecipientOnReuse(t *testing.T) {
 		t.Fatalf("To = %s after decoding a contract creation, want nil", tx.To)
 	}
 }
+
+func TestParseHexUint64AcceptsEitherCasePrefix(t *testing.T) {
+	for _, in := range []string{"0x1f", "0X1F", "1f"} {
+		got, err := parseHexUint64(in)
+		if err != nil {
+			t.Errorf("parseHexUint64(%q): %v", in, err)
+			continue
+		}
+		if got != 31 {
+			t.Errorf("parseHexUint64(%q) = %d, want 31", in, got)
+		}
+	}
+}

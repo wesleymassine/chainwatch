@@ -55,6 +55,7 @@ func TestLoad(t *testing.T) {
 		{name: "with header", in: "userId,address\n1," + a1 + "\n2," + a2 + "\n", want: 2},
 		{name: "without header", in: "1," + a1 + "\n2," + a2 + "\n", want: 2},
 		{name: "blank lines are skipped", in: "1," + a1 + "\n\n\n2," + a2 + "\n", want: 2},
+		{name: "header after a blank line", in: "\n\nuserId,address\n1," + a1 + "\n", want: 1},
 		{name: "no trailing newline", in: "1," + a1, want: 1},
 		{name: "missing comma", in: "1" + a1, wantErr: "line 1"},
 		{name: "userId is not a number", in: "abc," + a1, wantErr: "bad userId"},

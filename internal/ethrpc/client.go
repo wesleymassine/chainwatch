@@ -102,8 +102,8 @@ func (c *Client) Blocks(ctx context.Context, numbers []uint64) ([]*Block, error)
 				return nil, fmt.Errorf("block %d: %w", n, r.Error)
 			}
 			// A null result means the node does not have the block. Retrying
-			// would loop until maxAttempts and hide the real problem, which is
-			// that we asked for something past the head.
+			// would spin until maxBatchRounds and hide the real problem, which
+			// is that we asked for something past the head.
 			if len(r.Result) == 0 || bytes.Equal(r.Result, []byte("null")) {
 				return nil, fmt.Errorf("block %d not found", n)
 			}

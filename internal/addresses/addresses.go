@@ -47,10 +47,19 @@ type Set struct {
 func Load(r io.Reader) (*Set, error) {
 	s := &Set{m: make(map[Address]uint64)}
 	sc := bufio.NewScanner(r)
+	first := true
 	for n := 1; sc.Scan(); n++ {
 		line := bytes.TrimSpace(sc.Bytes())
-		if len(line) == 0 || (n == 1 && bytes.HasPrefix(line, []byte("userId"))) {
+		if len(line) == 0 {
 			continue
+		}
+		// The header is the first line with content on it, which is not always
+		// line 1.
+		if first {
+			first = false
+			if bytes.HasPrefix(line, []byte("userId")) {
+				continue
+			}
 		}
 		i := bytes.IndexByte(line, ',')
 		if i < 0 {
