@@ -324,3 +324,24 @@ func TestParseHexUint64AcceptsEitherCasePrefix(t *testing.T) {
 		}
 	}
 }
+
+// The endpoint's size cap surfaces two ways: a silently truncated batch, which
+// the re-request loop handles, and an explicit refusal, which it cannot — no
+// number of retries makes an oversized request fit. That one has to say so.
+func TestBlocksExplainsAnOversizedBatch(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `[{"id":0,"error":{"code":-32003,"message":"response too large"}}]`)
+	}))
+	defer srv.Close()
+
+	_, err := New(srv.URL, discardLogger()).Blocks(context.Background(), []uint64{100, 101, 102})
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if !strings.Contains(err.Error(), "BATCH_SIZE") {
+		t.Errorf("error = %v, want it to name the setting to change", err)
+	}
+	if !strings.Contains(err.Error(), "100-102") {
+		t.Errorf("error = %v, want it to name the range that was too big", err)
+	}
+}

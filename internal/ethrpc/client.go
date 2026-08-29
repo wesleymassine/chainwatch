@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -64,6 +65,27 @@ func (c *Client) BlockNumber(ctx context.Context) (uint64, error) {
 	return parseHexUint64(hex)
 }
 
+// ChainID identifies which chain this endpoint serves.
+//
+// It matters because it keys the checkpoint. Taking the identity from
+// configuration instead would let a mistyped setting resume mainnet progress
+// against Arbitrum, where the same block numbers mean something entirely
+// different. The chain is asked who it is.
+func (c *Client) ChainID(ctx context.Context) (uint64, error) {
+	res, err := c.call(ctx, []request{{Method: "eth_chainId", Params: []any{}}})
+	if err != nil {
+		return 0, err
+	}
+	if len(res) != 1 || res[0].Error != nil {
+		return 0, fmt.Errorf("eth_chainId: %w", responseErr(res))
+	}
+	var hex string
+	if err := json.Unmarshal(res[0].Result, &hex); err != nil {
+		return 0, err
+	}
+	return parseHexUint64(hex)
+}
+
 // Blocks fetches the given block numbers with their full transaction lists,
 // sorted ascending.
 //
@@ -99,6 +121,14 @@ func (c *Client) Blocks(ctx context.Context, numbers []uint64) ([]*Block, error)
 			}
 			n := pending[r.ID]
 			if r.Error != nil {
+				// The size cap has two faces. Sometimes the endpoint truncates
+				// the batch silently, which the loop below recovers from;
+				// sometimes it says so, and then the batch is simply too big to
+				// ever succeed and only a smaller one will.
+				if strings.Contains(strings.ToLower(r.Error.Message), "too large") {
+					return nil, fmt.Errorf("blocks %d-%d exceed the endpoint's response limit, lower BATCH_SIZE: %w",
+						pending[0], pending[len(pending)-1], r.Error)
+				}
 				return nil, fmt.Errorf("block %d: %w", n, r.Error)
 			}
 			// A null result means the node does not have the block. Retrying
