@@ -63,6 +63,19 @@ it is not here. _Written up at the end._
 make test-race
 ```
 
+The suite runs offline and deterministically: block fixtures are real blocks
+captured from mainnet and Arbitrum, and the JSON-RPC server is `httptest`. Tests
+that want a real node or a real broker skip themselves unless you point them at
+one:
+
+```sh
+CHAINWATCH_LIVE_RPC=https://ethereum-rpc.publicnode.com make test-race
+CHAINWATCH_KAFKA_BROKERS=localhost:9092 make test-race
+```
+
+That gate is why `internal/publisher` reports 32% coverage offline and 89% with
+a broker running.
+
 ## Development
 
 ```
