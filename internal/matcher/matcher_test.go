@@ -172,3 +172,20 @@ func mustAddr(tb testing.TB, s string) addresses.Address {
 	}
 	return a
 }
+
+// (*big.Int)(nil).String() is "<nil>", not a panic. The decoder never produces a
+// nil value, but nothing should be able to put that string in an amount field.
+func TestAmountIsNeverTheStringNil(t *testing.T) {
+	set, err := addresses.Load(strings.NewReader("1," + alice))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blk := &ethrpc.Block{Number: 1, Txs: []ethrpc.Tx{{Hash: "0x1", From: addr(t, alice)}}}
+	events := New(set).Block(blk)
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1", len(events))
+	}
+	if events[0].Amount == "<nil>" {
+		t.Fatalf("Amount = %q, which no consumer can parse", events[0].Amount)
+	}
+}

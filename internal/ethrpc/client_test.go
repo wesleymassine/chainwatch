@@ -272,3 +272,42 @@ func equal(a, b []int) bool {
 	}
 	return true
 }
+
+// A value is hex from a node we do not control, and big.Int.SetString happily
+// accepts a sign. A negative amount would reach the ledger looking valid.
+func TestDecodeRejectsMalformedValues(t *testing.T) {
+	const from = `"from":"0x28c6c06298d514db089934071355e5743bf21d60"`
+	tests := []struct {
+		name string
+		json string
+	}{
+		{name: "negative", json: `{"hash":"0x1",` + from + `,"to":null,"value":"0x-1"}`},
+		{name: "not hex", json: `{"hash":"0x1",` + from + `,"to":null,"value":"0xzz"}`},
+		{name: "empty", json: `{"hash":"0x1",` + from + `,"to":null,"value":"0x"}`},
+		{name: "missing", json: `{"hash":"0x1",` + from + `,"to":null}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var tx Tx
+			if err := json.Unmarshal([]byte(tt.json), &tx); err == nil {
+				t.Fatalf("decoded a %s value as %s, want an error", tt.name, tx.Value)
+			}
+		})
+	}
+}
+
+// Decoding must assign every field, not just the ones present. A Tx reused
+// across decodes that kept a previous recipient would credit the wrong user.
+func TestDecodeClearsRecipientOnReuse(t *testing.T) {
+	const from = `"from":"0x28c6c06298d514db089934071355e5743bf21d60"`
+	var tx Tx
+	if err := json.Unmarshal([]byte(`{"hash":"0x1",`+from+`,"to":"0x05ff6964d21e5dae3b1010d5ae0465b3c450f381","value":"0x1"}`), &tx); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(`{"hash":"0x2",`+from+`,"to":null,"value":"0x1"}`), &tx); err != nil {
+		t.Fatal(err)
+	}
+	if tx.To != nil {
+		t.Fatalf("To = %s after decoding a contract creation, want nil", tx.To)
+	}
+}

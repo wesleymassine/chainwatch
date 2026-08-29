@@ -69,18 +69,29 @@ func (t *Tx) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return fmt.Errorf("tx %s: from: %w", raw.Hash, err)
 	}
+
+	// to stays a local until the end. Assigning it in place would leave a
+	// previous recipient behind when this decodes a contract creation into a
+	// reused Tx — which in this service means crediting the wrong user.
+	var to *addresses.Address
 	if raw.To != nil {
-		to, err := addresses.ParseAddress([]byte(*raw.To))
+		parsed, err := addresses.ParseAddress([]byte(*raw.To))
 		if err != nil {
 			return fmt.Errorf("tx %s: to: %w", raw.Hash, err)
 		}
-		t.To = &to
+		to = &parsed
 	}
+
+	// big.Int.SetString accepts a leading sign, so "0x-1" would decode to a
+	// negative amount and travel on looking perfectly valid. The value comes
+	// from a public node we do not control, which is exactly the input worth
+	// distrusting.
 	value, ok := new(big.Int).SetString(strings.TrimPrefix(raw.Value, "0x"), 16)
-	if !ok {
+	if !ok || value.Sign() < 0 {
 		return fmt.Errorf("tx %s: bad value %q", raw.Hash, raw.Value)
 	}
-	t.Hash, t.From, t.Value = raw.Hash, from, value
+
+	t.Hash, t.From, t.To, t.Value = raw.Hash, from, to, value
 	return nil
 }
 

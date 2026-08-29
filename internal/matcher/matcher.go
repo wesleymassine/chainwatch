@@ -2,6 +2,8 @@
 package matcher
 
 import (
+	"math/big"
+
 	"github.com/wesleymassine/chainwatch/internal/addresses"
 	"github.com/wesleymassine/chainwatch/internal/ethrpc"
 )
@@ -67,7 +69,7 @@ func (m *Matcher) Block(b *ethrpc.Block) []Event {
 		event := Event{
 			From:        from,
 			To:          to,
-			Amount:      tx.Value.String(),
+			Amount:      weiString(tx.Value),
 			Hash:        tx.Hash,
 			BlockNumber: b.Number,
 		}
@@ -85,4 +87,18 @@ func (m *Matcher) Block(b *ethrpc.Block) []Event {
 		}
 	}
 	return events
+}
+
+// weiString renders a transaction value.
+//
+// The decoder never yields a nil value, but (*big.Int)(nil).String() is the
+// literal text "<nil>" rather than a panic — so a hand-built Tx could put a
+// string no consumer can parse into an amount field. Zero is the safe answer:
+// an event with amount 0 already has a meaning here, a contract interaction
+// that moved no ether.
+func weiString(v *big.Int) string {
+	if v == nil {
+		return "0"
+	}
+	return v.String()
 }
