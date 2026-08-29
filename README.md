@@ -11,10 +11,9 @@ interruption must cost duplicates, never a missed transaction.
 
 ```sh
 make up          # single-node Redpanda
-make topics      # tx-events (6 partitions) + compacted tx-checkpoints
 make dataset     # generate 500k addresses + active-wallet seeds
 cp .env.example .env
-make run
+make run         # creates its own topics, then starts
 ```
 
 Chain selection is config, not code:

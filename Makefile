@@ -2,7 +2,7 @@ GO      ?= go
 BINARY  ?= bin/chainwatch
 COMPOSE ?= docker compose
 
-.PHONY: build run test test-race vet fmt tidy up down topics dataset dist clean
+.PHONY: build run test test-race vet fmt tidy up down dataset dist clean
 
 build:
 	$(GO) build -o $(BINARY) ./cmd/chainwatch
@@ -31,12 +31,6 @@ up:
 
 down:
 	$(COMPOSE) down -v
-
-# tx-events is partitioned by userId; the checkpoint topic is compacted so only the
-# latest block per chain survives.
-topics:
-	$(COMPOSE) exec redpanda rpk topic create tx-events -p 6
-	$(COMPOSE) exec redpanda rpk topic create tx-checkpoints -p 1 -c cleanup.policy=compact
 
 dataset:
 	$(GO) run ./cmd/gendataset -n 500000 -o testdata/addresses.csv
