@@ -252,3 +252,88 @@ func TestEnsureTopicsIsIdempotentAndAppliesConfig(t *testing.T) {
 		t.Errorf("cleanup.policy = %q, want compact", policy)
 	}
 }
+
+// Per-user ordering is the guarantee this service actually makes, so it is worth
+// proving against a broker rather than asserting in a README.
+//
+// It rests on three things: the record key is the userId, so one user's events
+// land on one partition; the idempotent producer keeps a partition's writes in
+// sequence even with several requests in flight; and the pipeline publishes
+// blocks strictly in order, waiting for each ack.
+func TestKafkaPreservesPerUserOrder(t *testing.T) {
+	brokers := os.Getenv("CHAINWATCH_KAFKA_BROKERS")
+	if brokers == "" {
+		t.Skip("set CHAINWATCH_KAFKA_BROKERS to run against a broker")
+	}
+	seeds := strings.Split(brokers, ",")
+	topic := fmt.Sprintf("chainwatch-order-%d", time.Now().UnixNano())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	// Several partitions on purpose: if the key were wrong, one user's events
+	// would scatter and the order below would not survive.
+	if err := EnsureTopics(ctx, seeds, TopicSpec{Name: topic, Partitions: 6}); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := NewKafka(seeds, topic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	// One user, 200 blocks, published the way the pipeline publishes: one call
+	// per block, each awaiting its ack.
+	const blocks = 200
+	to := "0x05ff6964d21e5dae3b1010d5ae0465b3c450f381"
+	for i := 0; i < blocks; i++ {
+		e := matcher.Event{
+			UserID: 42, From: "0x28c6c06298d514db089934071355e5743bf21d60", To: &to,
+			Amount: "1", Hash: fmt.Sprintf("0x%064x", i), BlockNumber: uint64(1000 + i),
+		}
+		if err := p.Publish(ctx, []matcher.Event{e}); err != nil {
+			t.Fatalf("block %d: %v", 1000+i, err)
+		}
+	}
+
+	consumer, err := kgo.NewClient(
+		kgo.SeedBrokers(seeds...),
+		kgo.ConsumeTopics(topic),
+		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer consumer.Close()
+
+	var got []uint64
+	partitions := map[int32]bool{}
+	for len(got) < blocks {
+		fetches := consumer.PollFetches(ctx)
+		if err := fetches.Err(); err != nil {
+			if ctx.Err() != nil {
+				t.Fatalf("consuming: %v (got %d of %d)", err, len(got), blocks)
+			}
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		fetches.EachRecord(func(r *kgo.Record) {
+			var e matcher.Event
+			if err := json.Unmarshal(r.Value, &e); err != nil {
+				t.Errorf("decoding record: %v", err)
+				return
+			}
+			partitions[r.Partition] = true
+			got = append(got, e.BlockNumber)
+		})
+	}
+
+	if len(partitions) != 1 {
+		t.Errorf("one user's events landed on %d partitions, want 1", len(partitions))
+	}
+	for i, n := range got {
+		if want := uint64(1000 + i); n != want {
+			t.Fatalf("event %d is for block %d, want %d - ordering broke", i, n, want)
+		}
+	}
+}
