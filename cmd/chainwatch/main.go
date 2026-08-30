@@ -95,7 +95,28 @@ func run(log *slog.Logger) error {
 
 	// Bound before anything starts, so a port that cannot be opened stops the
 	// service now rather than leaving it running and unobservable.
-	server, err := metrics.Listen(metricsAddr, func() any { return p.Stats() }, log)
+	// Two groups, because they answer different questions and change at different
+	// rates. "watching" is what the service was told to do and never moves;
+	// "progress" is what it has done since it started. Flattening them together
+	// makes a reader wonder why one of the numbers never goes up.
+	snapshot := func() any {
+		return struct {
+			Watching struct {
+				Chain     string `json:"chain"`
+				ChainID   uint64 `json:"chainId"`
+				Addresses int    `json:"addresses"`
+			} `json:"watching"`
+			Progress pipeline.Stats `json:"progress"`
+		}{
+			Watching: struct {
+				Chain     string `json:"chain"`
+				ChainID   uint64 `json:"chainId"`
+				Addresses int    `json:"addresses"`
+			}{profile.Name, chainID, watched.Len()},
+			Progress: p.Stats(),
+		}
+	}
+	server, err := metrics.Listen(metricsAddr, snapshot, log)
 	if err != nil {
 		return err
 	}

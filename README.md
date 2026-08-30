@@ -23,9 +23,53 @@ Point it at another chain and it reconfigures itself:
 RPC_URL=https://arb1.arbitrum.io/rpc make run
 ```
 
+See what it is doing, in one screen — and see
+[Verify it yourself](#verify-it-yourself) for a short tour of every claim in this
+file:
+
 ```sh
-curl localhost:9090/metrics
+make verify
 ```
+
+```
+── dataset ─────────────────────────────────────────
+   500000 addresses in testdata/addresses.csv
+
+── service ─────────────────────────────────────────
+   {
+     "watching": {
+       "chain": "ethereum",
+       "chainId": 1,
+       "addresses": 500000
+     },
+     "progress": {
+       "blocksProcessed": 3,
+       "transactionsScanned": 821,
+       "eventsPublished": 86,
+       "reorgsHandled": 0,
+       "lastBlock": 25869470,
+       "chainHead": 25869472,
+       "blocksBehind": 2
+     }
+   }
+
+── kafka ───────────────────────────────────────────
+   86 events across 6 partitions
+   16 distinct users have events
+```
+
+The two groups answer different questions. `watching` is what the service was
+told to do and never changes while it runs; the address set is built once at
+startup and only read after that, which is also why it needs no lock. `progress`
+is what it has done since it started.
+
+`eventsPublished` and the Kafka count agree, which is the point: what the service
+reports having published is what is actually in the topic. `blocksBehind` is the
+number to watch. Here it is exactly `ConfirmDepth`, so the service is as close to
+the head as it is allowed to be.
+
+Only the seeded wallets ever appear. The other 499,980 addresses are random, so
+they correctly never match anything on a live chain.
 
 ## What it publishes
 
@@ -374,6 +418,92 @@ the provider.
 | Load 500k addresses | 135 ms, 31.9 MB resident, ~10 ns per lookup, zero allocations |
 | Match a block | ~18 ns per transaction, zero allocations when nothing matches |
 | Generate the dataset | 500k rows in 0.7 s, 23 allocations total |
+
+---
+
+# Verify it yourself
+
+Every claim in this file can be checked in a few minutes, on your machine, with
+the numbers coming from your run rather than from mine.
+
+## 1. It watches 500,000 addresses and publishes their transactions
+
+```sh
+make up && make dataset && make run
+```
+
+In another terminal:
+
+```sh
+make verify
+```
+
+Look for `"addresses": 500000` under `watching`, and `eventsPublished` under
+`progress` matching the Kafka count on the line below it. Those two numbers come
+from different places — the service and the broker — and they agree.
+
+`blocksBehind` should sit at `2`, which is exactly `ConfirmDepth`: as close to the
+head as the service is allowed to be.
+
+Only the seeded wallets produce events. The other 499,980 addresses are random,
+so they correctly never match anything on a live chain.
+
+## 2. The same binary runs on an L2 and configures itself
+
+```sh
+RPC_URL=https://arb1.arbitrum.io/rpc make run
+```
+
+The startup line will read `chain=arbitrum poll=250ms batch=100 confirmDepth=0`.
+None of that was passed in. The service asked the chain for its id, got 42161 and
+picked the measured profile. `confirmDepth=0` is the one that comes from how the
+chain works rather than how fast it is: Arbitrum has a single sequencer, so there
+is no competing block to wait out.
+
+Watch the block ranges in the log. The batch is configured at 100 and the real
+ones are one to three blocks, because at the head there is nothing to batch.
+
+## 3. It survives being killed without warning
+
+While it is running, note the last block in the log, then:
+
+```sh
+pkill -9 chainwatch
+make run
+```
+
+It will log `resuming from checkpoint` and start at that block plus one. Not at
+the chain head, and not at `START_BLOCK`. Kill it as rudely as you like: the
+checkpoint only ever moves after Kafka has acknowledged the events before it.
+
+## 4. Rate limiting slows it down but never stops it
+
+Leave it stopped for a minute, then start it again. It resumes a few thousand
+blocks behind, which puts it into catch-up and asks for hundred-block batches.
+A public endpoint will refuse some of those:
+
+```
+WARN rate limited, retrying attempt=5 backoff=1.534793811s
+WARN rate limited, retrying attempt=6 backoff=1.209745772s
+```
+
+It keeps going. The backoff grows and every value is different, so eight workers
+never retry in lockstep. Nothing is throttled to avoid the limit, and nothing is
+dropped because of it.
+
+## 5. The tests
+
+```sh
+make test-race    # everything, offline and deterministic
+make test-live    # against real nodes and a real broker, both chains
+```
+
+The throughput measurement prints what the pipeline does when the node is not the
+constraint:
+
+```sh
+go test -run TestThroughput -v ./internal/pipeline/
+```
 
 ---
 
