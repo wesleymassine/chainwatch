@@ -4,6 +4,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -22,6 +23,36 @@ type Options struct {
 	Poll      time.Duration // how often to ask for a new head once caught up
 	Workers   int           // concurrent fetches in flight
 	BatchSize int           // blocks per fetch
+
+	// ConfirmDepth is how far behind the head to stay. It is the cheap defence
+	// against reorgs: a block that is two deep on mainnet is very unlikely to be
+	// replaced, so staying behind avoids publishing work that the chain then
+	// discards. Arbitrum has a centralised sequencer and does not reorg, so it
+	// runs at zero and pays no latency for a risk it does not have.
+	ConfirmDepth uint64
+}
+
+// How far to go back when the chain turns out not to link up. Reorgs on
+// mainnet are one or two blocks deep and ConfirmDepth already absorbs those, so
+// this only runs for something unusual — and going back further than necessary
+// costs duplicates, which at-least-once permits, rather than correctness.
+const rewindDepth = 16
+
+// How many reorgs in a row before giving up. A chain that will not link up after
+// three rewinds is not reorganising, it is broken, and quietly rewinding forever
+// would look like a service that is running.
+const maxConsecutiveReorgs = 3
+
+// reorgError says the chain did not link up where it was expected to.
+type reorgError struct {
+	block  uint64
+	parent string
+	expect string
+}
+
+func (e *reorgError) Error() string {
+	return fmt.Sprintf("block %d has parent %s, expected %s: the chain reorganised",
+		e.block, e.parent, e.expect)
 }
 
 type Pipeline struct {
@@ -31,6 +62,12 @@ type Pipeline struct {
 	checkpoint checkpoint.Store
 	opts       Options
 	log        *slog.Logger
+
+	// Hash of the last published block, so the next one can be checked against
+	// it. Only ever touched by the goroutine draining the sequencer, which is
+	// why it needs no lock. Empty means the link is unknown and the next block
+	// is taken on trust — the first block after a start or a rewind.
+	lastHash string
 }
 
 func New(c *ethrpc.Client, m *matcher.Matcher, pub publisher.Publisher, cp checkpoint.Store, opts Options, log *slog.Logger) *Pipeline {
@@ -44,16 +81,43 @@ func (p *Pipeline) Run(ctx context.Context, fallback uint64) error {
 	if err != nil {
 		return err
 	}
+	reorgs := 0
 	for {
 		head, err := p.client.BlockNumber(ctx)
 		if err != nil {
 			return fmt.Errorf("reading head: %w", err)
 		}
-		if next <= head {
-			if err := p.catchUp(ctx, next, head); err != nil {
+		// Everything within ConfirmDepth of the head is still liable to change.
+		target := head
+		if target < p.opts.ConfirmDepth {
+			target = 0
+		} else {
+			target -= p.opts.ConfirmDepth
+		}
+
+		if next <= target {
+			err := p.catchUp(ctx, next, target)
+			var reorg *reorgError
+			if errors.As(err, &reorg) {
+				reorgs++
+				if reorgs > maxConsecutiveReorgs {
+					return fmt.Errorf("chain still not linking up after %d rewinds: %w",
+						maxConsecutiveReorgs, err)
+				}
+				next = rewind(reorg.block, rewindDepth)
+				// The link is unknown again: whatever we published before the
+				// fork may no longer be on the chain, so the block we resume at
+				// is taken on trust and re-establishes it.
+				p.lastHash = ""
+				p.log.Warn("reorg detected, rewinding",
+					"at", reorg.block, "resuming", next, "attempt", reorgs)
+				continue
+			}
+			if err != nil {
 				return err
 			}
-			next = head + 1
+			reorgs = 0
+			next = target + 1
 		}
 		select {
 		case <-time.After(p.opts.Poll):
@@ -61,6 +125,13 @@ func (p *Pipeline) Run(ctx context.Context, fallback uint64) error {
 			return ctx.Err()
 		}
 	}
+}
+
+func rewind(from, depth uint64) uint64 {
+	if from < depth {
+		return 0
+	}
+	return from - depth
 }
 
 // resume decides which block to start from.
@@ -78,6 +149,11 @@ func (p *Pipeline) resume(ctx context.Context, fallback uint64) (uint64, error) 
 		p.log.Info("no checkpoint found, starting fresh", "from", fallback)
 		return fallback, nil
 	}
+	// This is what the stored hash is for. Restoring it means the first block
+	// fetched after a restart is checked against the last one published before
+	// it, so a reorg that happened while the service was down is caught rather
+	// than assumed away.
+	p.lastHash = cp.Hash
 	p.log.Info("resuming from checkpoint", "block", cp.Block, "hash", cp.Hash, "from", cp.Block+1)
 	return cp.Block + 1, nil
 }
@@ -190,6 +266,17 @@ func (p *Pipeline) feed(ctx context.Context, jobs chan<- []uint64, from, to uint
 func (p *Pipeline) publish(ctx context.Context, blocks []*ethrpc.Block) error {
 	first, last := blocks[0], blocks[len(blocks)-1]
 
+	// Check the whole chunk links up before publishing any of it. A block whose
+	// parent is not what we published is a block on a different chain, and
+	// emitting it would credit users for transactions that no longer happened.
+	prev := p.lastHash
+	for _, block := range blocks {
+		if prev != "" && block.ParentHash != prev {
+			return &reorgError{block: block.Number, parent: block.ParentHash, expect: prev}
+		}
+		prev = block.Hash
+	}
+
 	var events []matcher.Event
 	txs := 0
 	for _, block := range blocks {
@@ -204,6 +291,7 @@ func (p *Pipeline) publish(ctx context.Context, blocks []*ethrpc.Block) error {
 		return err
 	}
 
+	p.lastHash = prev
 	p.log.Info("blocks processed",
 		"from", first.Number, "to", last.Number, "txs", txs, "events", len(events))
 	return nil

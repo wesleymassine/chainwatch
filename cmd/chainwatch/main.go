@@ -91,7 +91,8 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	log.Info("starting", "rpc", rpcURL, "chainId", chainID, "topic", topic, "fallback", from,
-		"poll", opts.Poll.String(), "workers", opts.Workers, "batch", opts.BatchSize)
+		"poll", opts.Poll.String(), "workers", opts.Workers, "batch", opts.BatchSize,
+		"confirmDepth", opts.ConfirmDepth)
 
 	return pipeline.New(client, matcher.New(watched), pub, store, opts, log).Run(ctx, from)
 }
@@ -112,7 +113,11 @@ func options() (pipeline.Options, error) {
 	if err != nil || batch < 1 {
 		return pipeline.Options{}, fmt.Errorf("BATCH_SIZE must be a positive number, got %q", env("BATCH_SIZE", "20"))
 	}
-	return pipeline.Options{Poll: poll, Workers: workers, BatchSize: batch}, nil
+	confirm, err := strconv.ParseUint(env("CONFIRM_DEPTH", "2"), 10, 64)
+	if err != nil {
+		return pipeline.Options{}, fmt.Errorf("CONFIRM_DEPTH must be a number, got %q", env("CONFIRM_DEPTH", "2"))
+	}
+	return pipeline.Options{Poll: poll, Workers: workers, BatchSize: batch, ConfirmDepth: confirm}, nil
 }
 
 // startBlock resolves START_BLOCK, which is either "latest" or a block number.

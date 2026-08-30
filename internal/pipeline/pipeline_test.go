@@ -36,6 +36,14 @@ type node struct {
 	delay     map[uint64]time.Duration // hold a block back, to force out-of-order arrival
 	inFlight  int
 	maxFlight int
+
+	// version stamps the block hashes. Bumping it swaps the chain underneath the
+	// pipeline, which is what a reorg looks like from here: the same numbers
+	// come back with different hashes that no longer link to what was published.
+	version int
+	forkAt  int  // bump the version once this many blocks have been served
+	chaos   bool // bump on every block, so the chain never settles
+	served  int
 }
 
 func (n *node) start(t *testing.T) *ethrpc.Client {
@@ -63,6 +71,11 @@ func (n *node) start(t *testing.T) *ethrpc.Client {
 				var number uint64
 				fmt.Sscanf(req.Params[0].(string), "0x%x", &number)
 				n.mu.Lock()
+				n.served++
+				if n.chaos || (n.forkAt > 0 && n.served == n.forkAt) {
+					n.version++
+				}
+				version := n.version
 				n.asked = append(n.asked, number)
 				n.inFlight++
 				if n.inFlight > n.maxFlight {
@@ -81,9 +94,9 @@ func (n *node) start(t *testing.T) *ethrpc.Client {
 				n.inFlight--
 				n.mu.Unlock()
 				out = append(out, fmt.Sprintf(
-					`{"id":%d,"result":{"number":"0x%x","hash":"0x%02x","parentHash":"0x%02x","transactions":[`+
+					`{"id":%d,"result":{"number":"0x%x","hash":"0x%d%02x","parentHash":"0x%d%02x","transactions":[`+
 						`{"hash":"0xdead","from":%q,"to":%q,"value":"0xde0b6b3a7640000"}]}}`,
-					req.ID, number, number, number-1, from, otherAddr))
+					req.ID, number, version, number, version, number-1, from, otherAddr))
 			}
 		}
 		fmt.Fprint(w, "["+strings.Join(out, ",")+"]")
@@ -99,6 +112,20 @@ func (n *node) blocksAsked() []uint64 {
 }
 
 func discard() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+// nodeHash mirrors the hashes the fake node serves, so tests can seed a
+// checkpoint the chain will actually agree with.
+func nodeHash(version int, number uint64) string {
+	return fmt.Sprintf("0x%d%02x", version, number)
+}
+
+func watchedRange(from, to uint64) map[uint64]bool {
+	out := map[uint64]bool{}
+	for n := from; n <= to; n++ {
+		out[n] = true
+	}
+	return out
+}
 
 func newPipeline(t *testing.T, n *node, pub publisher.Publisher, opts Options) (*Pipeline, *checkpoint.Fake) {
 	t.Helper()
@@ -307,7 +334,7 @@ func TestResumesFromTheCheckpointRatherThanTheFallback(t *testing.T) {
 	n := &node{head: 105, watchedIn: watched}
 	fake := publisher.NewFake()
 	p, cp := newPipeline(t, n, fake, sequential)
-	cp.Seed(checkpoint.Checkpoint{Block: 102, Hash: "0x66"})
+	cp.Seed(checkpoint.Checkpoint{Block: 102, Hash: nodeHash(0, 102)})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -378,5 +405,116 @@ func TestCheckpointDoesNotMoveWhenPublishFails(t *testing.T) {
 	saved := cp.Saved()
 	if len(saved) != 1 || saved[0].Block != 104 {
 		t.Fatalf("checkpoints = %+v, want only the first chunk (block 104)", saved)
+	}
+}
+
+// Blocks near the head can still be replaced, so they are left alone until they
+// are ConfirmDepth deep.
+func TestConfirmDepthStaysBehindTheHead(t *testing.T) {
+	n := &node{head: 110, watchedIn: watchedRange(100, 110)}
+	fake := publisher.NewFake()
+	p, _ := newPipeline(t, n, fake, Options{Poll: time.Hour, Workers: 1, BatchSize: 1, ConfirmDepth: 3})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- p.Run(ctx, 100) }()
+
+	waitFor(t, "the confirmed blocks", func() bool { return len(fake.Events()) == 8 })
+	cancel()
+	<-done
+
+	// 110 minus a depth of 3 leaves 107 as the last block that may be published.
+	if want := []uint64{100, 101, 102, 103, 104, 105, 106, 107}; !equal(n.blocksAsked(), want) {
+		t.Errorf("blocks asked = %v, want %v", n.blocksAsked(), want)
+	}
+}
+
+// A block whose parent is not what we published belongs to a different chain.
+// Publishing it would credit users for transactions that no longer happened, so
+// the whole chunk is refused and the pipeline goes back.
+func TestReorgIsDetectedAndRewound(t *testing.T) {
+	n := &node{head: 140, watchedIn: watchedRange(100, 140), forkAt: 5}
+	fake := publisher.NewFake()
+	p, cp := newPipeline(t, n, fake, Options{Poll: time.Hour, Workers: 1, BatchSize: 1, ConfirmDepth: 0})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- p.Run(ctx, 100) }()
+
+	// The fork lands after five blocks, so the pipeline must go back before 105
+	// and come out the other side still reaching the head.
+	waitFor(t, "the run to reach the head", func() bool {
+		saved := cp.Saved()
+		return len(saved) > 0 && saved[len(saved)-1].Block == 140
+	})
+	cancel()
+	<-done
+
+	asked := n.blocksAsked()
+	var rewound bool
+	for i := 1; i < len(asked); i++ {
+		if asked[i] < asked[i-1] {
+			rewound = true
+			if asked[i] > 104 {
+				t.Errorf("rewound only to %d, want to before the fork at 105", asked[i])
+			}
+		}
+	}
+	if !rewound {
+		t.Fatalf("never went back; blocks asked = %v", asked)
+	}
+	if len(fake.Events()) == 0 {
+		t.Error("published nothing at all")
+	}
+}
+
+// A chain that will not link up is broken, not reorganising. Rewinding forever
+// would look like a service that is running.
+func TestGivesUpAfterRepeatedReorgs(t *testing.T) {
+	n := &node{head: 200, watchedIn: watchedRange(100, 200), chaos: true}
+	p, _ := newPipeline(t, n, publisher.NewFake(), Options{Poll: time.Hour, Workers: 1, BatchSize: 4, ConfirmDepth: 0})
+
+	err := p.Run(context.Background(), 100)
+	if err == nil {
+		t.Fatal("want an error rather than rewinding forever")
+	}
+	if !strings.Contains(err.Error(), "not linking up") {
+		t.Errorf("error = %v, want it to say the chain never settled", err)
+	}
+}
+
+// The hash stored with the checkpoint exists for this: a reorg that happened
+// while the service was down has to be caught on the way back up, not assumed
+// away.
+func TestReorgWhileDownIsCaughtOnResume(t *testing.T) {
+	n := &node{head: 140, watchedIn: watchedRange(100, 140)}
+	n.version = 1 // the chain moved on while we were away
+	fake := publisher.NewFake()
+	p, cp := newPipeline(t, n, fake, Options{Poll: time.Hour, Workers: 1, BatchSize: 1, ConfirmDepth: 0})
+	// Recorded against the chain as it was before the fork.
+	cp.Seed(checkpoint.Checkpoint{Block: 120, Hash: nodeHash(0, 120)})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- p.Run(ctx, 100) }()
+
+	waitFor(t, "the rewind", func() bool {
+		asked := n.blocksAsked()
+		return len(asked) > 1 && asked[len(asked)-1] < asked[0]
+	})
+	cancel()
+	<-done
+
+	asked := n.blocksAsked()
+	if asked[0] != 121 {
+		t.Fatalf("resumed at %d, want 121", asked[0])
+	}
+	// 121 does not link to the stored hash, so it goes back rather than
+	// publishing a block from a chain that no longer exists.
+	if got := asked[1]; got > 105 {
+		t.Errorf("after the failed link it asked for %d, want a rewind below 105", got)
 	}
 }
