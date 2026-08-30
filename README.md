@@ -416,3 +416,23 @@ unrestricted node, which makes this a problem it explicitly asks us not to solve
 
 **Multi-endpoint failover, finality tracking beyond a fixed depth, and a schema
 registry.** All reasonable next steps; none of them are the core problem.
+
+---
+
+# Reading the history
+
+This was delivered as a ZIP with `.git` included, so the commit history travels
+with it:
+
+```sh
+git log --oneline
+```
+
+It is worth the minute. The order the decisions were made in explains more than
+the final state does — the walking skeleton before the concurrency, the
+checkpoint before the reorg handling — and several `fix:` commits mark the points
+where a measurement contradicted an assumption I had been confident about.
+
+The same repository is on GitHub, private. Ask and I will grant access:
+
+**https://github.com/wesleymassine/chainwatch**
