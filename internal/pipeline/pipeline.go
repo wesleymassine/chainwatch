@@ -38,6 +38,9 @@ type Options struct {
 // costs duplicates, which at-least-once permits, rather than correctness.
 const rewindDepth = 16
 
+// How long the checkpoint save is allowed to outlive a shutdown. See publish.
+const checkpointGrace = 5 * time.Second
+
 // How many reorgs in a row before giving up. A chain that will not link up after
 // three rewinds is not reorganising, it is broken, and quietly rewinding forever
 // would look like a service that is running.
@@ -287,7 +290,13 @@ func (p *Pipeline) publish(ctx context.Context, blocks []*ethrpc.Block) error {
 	if err := p.publisher.Publish(ctx, events); err != nil {
 		return fmt.Errorf("publishing blocks %d-%d: %w", first.Number, last.Number, err)
 	}
-	if err := p.checkpoint.Save(ctx, checkpoint.Checkpoint{Block: last.Number, Hash: last.Hash}); err != nil {
+	// The broker has the events now. Recording that must not be abandoned just
+	// because a shutdown started a moment ago, so the save gets its own context:
+	// giving up here would republish this whole chunk on the next start, which
+	// is a duplicate we chose to make rather than one we could not avoid.
+	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), checkpointGrace)
+	defer cancel()
+	if err := p.checkpoint.Save(saveCtx, checkpoint.Checkpoint{Block: last.Number, Hash: last.Hash}); err != nil {
 		return err
 	}
 

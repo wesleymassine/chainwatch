@@ -518,3 +518,39 @@ func TestReorgWhileDownIsCaughtOnResume(t *testing.T) {
 		t.Errorf("after the failed link it asked for %d, want a rewind below 105", got)
 	}
 }
+
+// cancelPublisher pulls the plug the instant a batch is acknowledged, which is
+// the worst moment for a shutdown to arrive: the events are durable but nothing
+// has recorded that yet.
+type cancelPublisher struct {
+	*publisher.Fake
+	cancel context.CancelFunc
+}
+
+func (c *cancelPublisher) Publish(ctx context.Context, events []matcher.Event) error {
+	if err := c.Fake.Publish(ctx, events); err != nil {
+		return err
+	}
+	c.cancel()
+	return nil
+}
+
+// A shutdown between publishing and recording must not cost a republished chunk.
+func TestCheckpointSurvivesShutdownAfterPublish(t *testing.T) {
+	n := &node{head: 120, watchedIn: watchedRange(100, 120)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pub := &cancelPublisher{Fake: publisher.NewFake(), cancel: cancel}
+	p, cp := newPipeline(t, n, pub, Options{Poll: time.Hour, Workers: 1, BatchSize: 5})
+
+	_ = p.Run(ctx, 100)
+
+	saved := cp.Saved()
+	if len(saved) == 0 {
+		t.Fatal("the chunk was published but never recorded: a restart would send it again")
+	}
+	if saved[len(saved)-1].Block != 104 {
+		t.Errorf("checkpoint = block %d, want 104 — the chunk that was acknowledged", saved[len(saved)-1].Block)
+	}
+}
