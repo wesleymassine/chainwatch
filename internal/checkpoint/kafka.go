@@ -14,10 +14,10 @@ import (
 // Kafka stores the checkpoint as a record in a compacted topic, keyed by chain.
 //
 // Compaction is what makes this work: the topic keeps only the latest value per
-// key, so it stays one record per chain no matter how long the service runs. It
-// is also why the topic must be created deliberately — a topic the broker made
-// on first produce would have retention instead, and retention is free to
-// delete the very record we depend on.
+// key, so it stays one record per chain however long the service runs. It is also
+// why the topic must be created deliberately. A topic the broker makes on first
+// produce gets retention instead, and retention is free to delete the one record
+// we depend on.
 type Kafka struct {
 	brokers  []string
 	topic    string
@@ -138,10 +138,9 @@ type partitionRange struct{ start, end int64 }
 
 // logRanges asks the broker what the log actually holds right now.
 //
-// Partitions are discovered rather than assumed. The checkpoint topic is created
-// with one, but pointing the service at a topic with more and reading only the
-// first would quietly miss the checkpoint — the failure worth spending these
-// lines to rule out.
+// Partitions are discovered, not assumed. We create the checkpoint topic with
+// one. But point the service at a topic with more, read only the first, and the
+// checkpoint is quietly missed. That is the failure these lines rule out.
 func (k *Kafka) logRanges(ctx context.Context) (map[int32]partitionRange, error) {
 	meta := kmsg.NewPtrMetadataRequest()
 	topic := kmsg.NewMetadataRequestTopic()

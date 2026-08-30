@@ -6,9 +6,9 @@ import "context"
 
 // Checkpoint is the last block whose events are known to be in Kafka.
 //
-// The hash travels with the number because a block number alone does not
-// identify a block: after a reorg the same number can name different content,
-// and commit 8 needs the hash to notice.
+// The hash travels with the number because a number alone does not identify a
+// block. After a reorg the same number can name different content, and the hash
+// is how we notice.
 type Checkpoint struct {
 	Block uint64 `json:"blockNumber"`
 	Hash  string `json:"blockHash"`

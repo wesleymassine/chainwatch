@@ -11,11 +11,10 @@ import (
 // Event is the payload published to Kafka. The field names and their order come
 // straight from the brief.
 //
-// Amount is a decimal string, not a number, and that is not a style choice: a
-// transfer of 10 ETH is 10000000000000000000 wei, well past the 2^53 where a
-// JSON number starts losing precision in any float64-backed parser. The value
-// would arrive subtly wrong, with nothing to signal it — the worst kind of bug
-// to have in a ledger.
+// Amount is a decimal string, not a number, and that is not a style choice. Ten
+// ether is 10000000000000000000 wei, well past the 2^53 where a float64-backed
+// JSON parser starts rounding. The value would arrive slightly wrong and nothing
+// would warn us. In a ledger that is the worst kind of bug.
 //
 // To is a pointer so that a contract creation marshals as null rather than
 // pretending the transaction went to the zero address.
@@ -39,11 +38,11 @@ func New(watched *addresses.Set) *Matcher {
 
 // Block returns one event for every user involved in the block.
 //
-// A transaction between two watched users produces two events, one per userId,
-// so that a consumer partitioned by user still sees both sides. A transaction
-// where both ends belong to the same user produces one: emitting the same event
-// twice would be a duplicate we knowingly created, and at-least-once is a floor
-// to respect, not an excuse.
+// A transaction between two watched users produces two events, one per userId, so
+// a consumer partitioned by user still sees both sides. A transaction where both
+// ends belong to the same user produces one. Emitting the same event twice would
+// be a duplicate we created on purpose, and at-least-once is a floor to respect,
+// not an excuse.
 func (m *Matcher) Block(b *ethrpc.Block) []Event {
 	var events []Event
 	for i := range b.Txs {
@@ -91,11 +90,10 @@ func (m *Matcher) Block(b *ethrpc.Block) []Event {
 
 // weiString renders a transaction value.
 //
-// The decoder never yields a nil value, but (*big.Int)(nil).String() is the
-// literal text "<nil>" rather than a panic — so a hand-built Tx could put a
-// string no consumer can parse into an amount field. Zero is the safe answer:
-// an event with amount 0 already has a meaning here, a contract interaction
-// that moved no ether.
+// The decoder never yields a nil value. But (*big.Int)(nil).String() returns the
+// text "<nil>" instead of panicking, so a hand-built Tx could put a string no
+// consumer can parse into an amount field. Zero is the safe answer: an amount of
+// 0 already means something here, a contract call that moved no ether.
 func weiString(v *big.Int) string {
 	if v == nil {
 		return "0"

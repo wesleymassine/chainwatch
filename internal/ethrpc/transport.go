@@ -68,23 +68,23 @@ func (c *Client) call(ctx context.Context, reqs []request) ([]response, error) {
 	return res, nil
 }
 
-// post retries the failures that are worth retrying, and treats rate limiting as
-// something other than a failure.
+// post retries what is worth retrying, and treats rate limiting as something
+// other than a failure.
 //
 // The brief says to assume unrestricted usage and not to slow down for rate
-// limits, and nothing here does: the steady state is never throttled, and no
+// limits. Nothing here does: the steady state is never throttled, and no
 // concurrency is given up to stay under a limit.
 //
 // But a 429 is the endpoint asking us to come back, not a request that failed.
-// Giving up on one drops blocks, and dropping blocks is the single outcome that
-// is not allowed — so 429s are retried for as long as the caller's context
-// lives, and only genuine failures spend the budget. Arbitrum's public endpoint
-// makes this concrete: eight workers fetching batches of a hundred draw a storm
-// of 429s within a second, and a finite budget there kills the service on the
-// very L2 it is required to support.
+// Giving up on one drops blocks, and that is the one outcome not allowed. So a
+// 429 is retried for as long as the caller's context lives, and only real
+// failures spend the budget.
 //
-// They are logged rather than swallowed, so the rate limiting stays visible in
-// the output without ever being worked around.
+// Arbitrum's public endpoint makes this concrete. Eight workers fetching batches
+// of a hundred draw a storm of 429s within a second. With a finite budget the
+// service dies on the very L2 it has to support.
+//
+// The retries are logged, so the rate limiting stays visible instead of hidden.
 func (c *Client) post(ctx context.Context, body []byte) ([]byte, error) {
 	var lastErr error
 	for attempt, failures := 0, 0; failures < maxHTTPFailures; attempt++ {

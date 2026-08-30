@@ -20,17 +20,16 @@ type TopicSpec struct {
 
 // EnsureTopics creates any of the given topics that does not exist yet.
 //
-// The service provisions its own topics rather than leaving it to a setup step,
-// so that starting it — or a pod being rescheduled — needs nothing else to have
-// run first. It is safe on every start: a topic that already exists is left
-// exactly as it is.
+// The service provisions its own topics instead of leaving it to a setup step.
+// Starting it, or a pod being rescheduled, needs nothing else to have run first.
+// It is safe on every start: a topic that already exists is left as it is.
 //
-// What it deliberately does not do is let the broker create topics implicitly on
-// first produce. That path ignores the configuration below and applies server
-// defaults, which for the checkpoint topic means retention instead of
-// compaction — and a checkpoint that retention is free to delete is not a
-// checkpoint. Creating them explicitly is what makes the configuration part of
-// the code rather than part of someone's shell history.
+// What it deliberately does not do is let the broker create topics on first
+// produce. That path ignores the configuration below and applies server defaults.
+// For the checkpoint topic that means retention instead of compaction, and a
+// checkpoint that retention can delete is not a checkpoint. Creating them here is
+// what keeps the configuration in the code instead of in someone's shell
+// history.
 func EnsureTopics(ctx context.Context, brokers []string, specs ...TopicSpec) error {
 	client, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
 	if err != nil {

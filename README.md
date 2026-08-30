@@ -3,8 +3,8 @@
 Watches Ethereum Mainnet and compatible L2 chains for transactions involving a
 set of 500,000 known addresses, and publishes each match to Kafka.
 
-It is built to be killed at any moment. The service is meant to run on spot
-instances, so an interruption has to cost duplicate events, never a missed one.
+It is built to be killed at any moment. It runs on spot instances, so being
+interrupted has to cost duplicate events, never a missing one.
 
 ## Quick start
 
@@ -69,18 +69,18 @@ the code does.
 **The chain:** a transaction does not carry the sender's address. It carries a
 signature, and the sender is recovered from it.
 
-**The consequence:** `go-ethereum`'s `ethclient` gives you a transaction without
-a `from` field, so getting it means recovering an ECDSA key — 50 to 100
-microseconds each. Over an hour of Arbitrum blocks that is about ten minutes of
-CPU spent computing something the node already knew.
+**The consequence:** `go-ethereum`'s `ethclient` hands you a transaction with no
+`from` field. Getting it back means recovering an ECDSA key, which takes 50 to 100
+microseconds each time. Over an hour of Arbitrum blocks that is about ten minutes
+of CPU, spent working out something the node already knew.
 
 **What we do:** read the field the node sends. JSON-RPC returns `from` on every
 transaction, so [`Tx`](internal/ethrpc/types.go#L32) reads it and never touches
 the signature. Ten minutes becomes fifteen seconds.
 
-Once the typed decoding is gone, `go-ethereum` has nothing left to offer: it
-would pull 168 modules to provide an HTTP wrapper and a 20-byte array. So
-[`ethrpc`](internal/ethrpc/client.go) is `net/http` and `encoding/json`, and the
+Once the typed decoding is gone, `go-ethereum` has nothing left to offer. It
+would pull in 168 modules to give us an HTTP wrapper and a 20-byte array. So
+[`ethrpc`](internal/ethrpc/client.go) uses `net/http` and `encoding/json`, and the
 only dependency in the project is the Kafka client.
 
 ## Chains keep inventing new transaction types
@@ -90,9 +90,9 @@ single block** — 300 out of 300 in a sample. Mainnet now carries `0x3` blob an
 `0x4` set-code transactions in ordinary ones.
 
 **The consequence:** a decoder built around a fixed set of types rejects what it
-does not recognise, and the usual reaction is to skip the whole block. On
-Arbitrum that means skipping every block. An L1→L2 deposit landing in a user's
-wallet is exactly the event a neobank cannot afford to miss.
+does not know. The usual reaction is to skip the whole block, and on Arbitrum that
+means skipping every block. An L1→L2 deposit landing in a user's wallet is exactly
+the event a neobank cannot afford to miss.
 
 **What we do:** [`Tx`](internal/ethrpc/types.go#L32) never reads the type field.
 It takes the four things it needs and ignores everything else, so a chain can
@@ -102,9 +102,9 @@ introduce a type tomorrow without breaking us.
 
 **The chain:** values are `uint256` in wei. Ten ether is 10,000,000,000,000,000,000.
 
-**The consequence:** that is past 2^53, where any float64-backed JSON parser
-starts rounding. The value arrives subtly wrong with nothing to signal it, which
-is the worst thing that can happen to a ledger.
+**The consequence:** that is past 2^53, where a float64-backed JSON parser starts
+rounding. The value arrives slightly wrong and nothing warns you. For a ledger,
+that is the worst kind of bug.
 
 **What we do:** [`Event.Amount`](internal/matcher/matcher.go#L22) is a decimal
 string, and `*big.Int` internally.
@@ -127,15 +127,15 @@ single sequencer deciding order, nothing competes, so it runs at zero and pays n
 latency for a risk it does not have —
 see [profiles](internal/config/config.go#L31).
 
-Check the links. Every block carries the fingerprint of the one before it: that
-is what makes it a chain. [`publish`](internal/pipeline/pipeline.go#L306) checks
-the whole batch links to what we last published **before** sending any of it. If
-it does not, the chain moved, so we publish nothing, go back sixteen blocks and
-read again.
+Check the links. Every block carries the fingerprint of the one before it, and
+that is what makes it a chain. [`publish`](internal/pipeline/pipeline.go#L306)
+checks that the whole batch links to what we last published, **before** sending any
+of it. If it does not, the chain has moved. We publish nothing, go back sixteen
+blocks and read again.
 
-We do not hunt for the exact fork point, because we are allowed to repeat.
+We do not look for the exact fork point, because we are allowed to repeat.
 Duplicates are permitted, so going back far enough is as correct as going back
-precisely — and it saved a whole data structure.
+precisely. It also saved us a whole data structure.
 
 ## The chain can move while the service is down
 
@@ -157,10 +157,10 @@ not say to *give up* on them — and a 429 that ends the request drops the block
 it was carrying.
 
 **What we do:** [`post`](internal/ethrpc/transport.go#L88) retries a 429 for as
-long as the caller's context lives, and it does not spend the failure budget,
-which stays reserved for 5xx and transport errors. Nothing is throttled: the
-steady state is never slowed and no concurrency is given up. The retries are
-logged so the rate limiting stays visible rather than hidden.
+long as the caller's context lives. It does not spend the failure budget, which is
+reserved for 5xx and transport errors. Nothing is throttled: the steady state is
+never slowed down and no concurrency is given up. The retries are logged, so the
+rate limiting stays visible instead of hidden.
 
 Without this the service died on Arbitrum after 21 rate limits, having published
 nothing — while every offline test stayed green.
@@ -178,9 +178,9 @@ trace.
 by JSON-RPC id, works out which blocks did not come back, and asks again. A block
 counts as fetched only when its result is in hand.
 
-The same cap sometimes refuses outright instead of truncating, which no retry can
-fix, so that error names the setting to lower rather than reporting a bare
-protocol code.
+Sometimes the same cap refuses outright instead of truncating. No retry can fix
+that, so the error names the setting to lower instead of showing a bare protocol
+code.
 
 ## Fetching concurrently breaks the order the chain has
 
@@ -191,12 +191,12 @@ checkpoint meaningful.
 arrival order would put block 340 into Kafka before 320, and a checkpoint written
 after 340 would claim work that never happened.
 
-**What we do:** workers fetch contiguous ranges rather than single blocks, so
-what arrives out of order is whole chunks. The
+**What we do:** workers fetch contiguous ranges instead of single blocks, so what
+arrives out of order is whole chunks. The
 [sequencer](internal/pipeline/sequencer.go#L31) holds a chunk until every block
 before it has been released. It does no I/O, takes no lock and starts no
-goroutine — ordering is the property most likely to break under concurrency, so
-it lives somewhere it can be tested without any.
+goroutine. Ordering is what breaks most easily under concurrency, so it lives
+where it can be tested without any.
 
 ## A checkpoint may only move after the broker has the events
 
@@ -206,9 +206,9 @@ leaves the checkpoint claiming work that was never published — those transacti
 are never looked at again.
 
 **What we do:** [`publish`](internal/pipeline/pipeline.go#L306) matches,
-publishes, waits for the broker's acknowledgement, and only then saves. That
-save gets a context that survives shutdown, because abandoning it would
-republish the batch on the next start: a duplicate we chose to create rather than
+publishes, waits for the broker's acknowledgement, and only then saves. That save
+gets a context that survives shutdown. Giving up there would republish the whole
+batch on the next start, and that is a duplicate we chose to create rather than
 one we could not avoid.
 
 ## Local disk does not survive a spot instance
@@ -222,11 +222,11 @@ keeps only the latest record per key, so it stays one record per chain however
 long the service runs. Kafka is already a dependency and already durable, so this
 adds nothing to deploy and does not violate the brief's "don't add databases".
 
-Deciding there is *no* checkpoint is the dangerous direction: it sends the
-service to the chain head and skips everything in between. So
-[`Load`](internal/checkpoint/kafka.go#L64) establishes where the log ends before
-reading, and proves a topic empty rather than inferring it from a read that has
-not returned anything yet.
+Deciding there is *no* checkpoint is the dangerous direction. It sends the service
+to the chain head and skips everything in between. So
+[`Load`](internal/checkpoint/kafka.go#L64) finds out where the log ends before it
+reads. An empty topic is proved empty, not guessed at from a read that has not
+returned anything yet.
 
 ## Topics must exist with the right configuration
 
@@ -272,10 +272,10 @@ all on one partition and in exact order.
 At-least-once is only half a contract. The other half is what the reader is
 expected to handle, and it is not obvious from the payload alone.
 
-**Deduplicate on `hash` + `userId`.** Not on `hash` alone: one transaction
-between two watched users produces two events, one per user, and both are
-correct. The pair is the natural idempotency key — a restart, a reorg rewind or
-a retried batch all republish the same pair.
+**Deduplicate on `hash` + `userId`.** Not on `hash` alone. One transaction between
+two watched users produces two events, one per user, and both are correct. The
+pair is the natural idempotency key. A restart, a reorg rewind and a retried batch
+all republish the same pair.
 
 **Order is per user, not global.** Events for one `userId` land on one partition
 and arrive in the order they happened. Events for different users are on
@@ -284,16 +284,41 @@ ordering would mean one partition, and one partition would mean no parallel
 consumption.
 
 **Nothing is ever retracted.** If a block is published and then discarded by a
-reorg, its events stay in the topic. Rewinding republishes the replacement
-chain, so a transaction that survives the reorg is deduplicated by the pair
-above — but a transaction that existed only on the discarded fork remains as an
-event for something that no longer happened.
+reorg, its events stay in the topic. Rewinding republishes the new chain, so a
+transaction that survives the reorg is deduplicated by the pair above. One that
+existed only on the discarded fork stays behind, as an event for something that no
+longer happened.
 
-`ConfirmDepth` is what makes this rare rather than routine: a block two deep on
-mainnet is effectively settled. A system that cannot tolerate it at all would
-wait for finality instead of a fixed depth, or publish retractions — both are
-larger designs than at-least-once asks for, and the brief asks for
-at-least-once.
+`ConfirmDepth` is what makes this rare instead of routine: a block two deep on
+mainnet is effectively settled. A system that could not tolerate it at all would
+wait for finality instead of a fixed depth, or publish retractions. Both are
+bigger designs than at-least-once needs, and at-least-once is what the brief
+asks for.
+
+## What each decision cost
+
+Every decision above bought something. None of them was free, and a reader should
+be able to challenge any of them without having to work out the price first.
+
+| Decision | What it cost |
+|---|---|
+| Staying `ConfirmDepth` blocks behind the head | About 25 seconds of latency on mainnet. Arbitrum pays nothing — it runs at zero. |
+| Rewinding a fixed 16 blocks instead of locating the fork | Up to 16 blocks re-emitted per reorg, and one data structure never written. |
+| One acknowledgement per chunk rather than per block | The duplicate window on restart is the batch size: up to 20 blocks on mainnet, 100 on Arbitrum. |
+| Writing the JSON-RPC client instead of using go-ethereum | 446 lines that are now ours to maintain, against 168 modules that were not. |
+| Keeping the checkpoint in Kafka rather than on disk | 82 lines of metadata and offset plumbing, purely to know when to stop reading. |
+| Eight workers rather than sixteen | Ten percent of the throughput ceiling, for 100 MB less resident memory. |
+| Polling instead of `eth_subscribe` | Up to one poll interval of latency: 3s on mainnet, 250ms on Arbitrum. |
+| The service creating its own topics | It needs `CreateTopics` on the broker, which a locked-down cluster may not grant. |
+| `amount` as a decimal string | Every consumer has to parse it. A JSON number would not survive the values. |
+| At-least-once without retractions | A deeply reorged block leaves events for transactions that no longer happened. |
+
+Two of these are worth questioning. The confirmation delay is what we pay to avoid
+publishing work the chain then discards; on a chain that settles differently it
+should be a different number. The duplicate window is what we pay for an
+acknowledgement barrier wide enough not to cost throughput. Narrowing it to one
+block is a single line of code, and it is measurably slower for a guarantee the
+brief does not ask for.
 
 ---
 
@@ -332,9 +357,9 @@ Adding workers stops helping and then starts hurting. **The provider is roughly
 thirty times slower than the service reading from it.** That is what "the ceiling
 is external" means as a number rather than an assertion.
 
-Arbitrum's free endpoint is tighter still: it serves about one hundred-block
-request every 15–20 seconds, and concurrency makes it strictly worse — 429s scale
-linearly with workers while completed work falls to zero.
+Arbitrum's free endpoint is tighter still. It serves about one hundred-block
+request every 15–20 seconds, and adding workers makes it worse: the 429s grow with
+every worker while the work completed falls to zero.
 
 **Real time is unaffected.** At the head there is nothing to batch: each poll
 finds one to four new blocks, the requests are small, and every one is served.
@@ -360,11 +385,11 @@ make test-live        # against real nodes and a real broker, both chains
 go test -short ./...  # skips the throughput measurement, ~5s
 ```
 
-The offline suite talks to an `httptest` server, and the block fixtures are
-**real blocks captured from mainnet and Arbitrum** — between them they cover
-every transaction type both chains currently produce, plus a contract creation.
-Invented JSON would prove nothing here; the whole point is surviving what the
-chains actually emit.
+The offline suite talks to an `httptest` server, and the block fixtures are **real
+blocks captured from mainnet and Arbitrum**. Between them they cover every
+transaction type both chains currently produce, plus a contract creation. Invented
+JSON would prove nothing here. The whole point is surviving what the chains
+actually emit.
 
 Two tests carry more weight than the rest:
 
@@ -376,11 +401,11 @@ something counts.
 against the same checkpoint with no configured start block. Every block is still
 accounted for afterwards.
 
-Verified separately with a real `SIGKILL` against mainnet, reading the events
-back out of Kafka rather than trusting the logs: 7,261 events across the expected
-301-block range, with no block missing. Two blocks produced no events at all —
-checked against the chain, one holds nine transactions that touch none of the
-watched addresses and the other is empty, so publishing nothing there is correct.
+Verified again with a real `SIGKILL` against mainnet. The events were read back
+out of Kafka instead of trusting the logs: 7,261 events across the expected
+301-block range, with no block missing. Two blocks produced no events at all. Both
+were checked against the chain: one holds nine transactions that touch none of the
+watched addresses, and the other is empty. Publishing nothing there is correct.
 
 Coverage where it matters: matcher and config 100%, pipeline 95%, addresses 97%.
 
@@ -429,9 +454,9 @@ git log --oneline
 ```
 
 It is worth the minute. The order the decisions were made in explains more than
-the final state does — the walking skeleton before the concurrency, the
-checkpoint before the reorg handling — and several `fix:` commits mark the points
-where a measurement contradicted an assumption I had been confident about.
+the final state does: the walking skeleton before the concurrency, the checkpoint
+before the reorg handling. Several `fix:` commits mark the points where a
+measurement contradicted an assumption I had been confident about.
 
 The same repository is on GitHub, private. Ask and I will grant access:
 

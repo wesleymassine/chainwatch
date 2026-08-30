@@ -4,10 +4,10 @@ import "github.com/wesleymassine/chainwatch/internal/ethrpc"
 
 // sequencer restores order to chunks fetched concurrently.
 //
-// Workers fetch contiguous ranges rather than single blocks, because the RPC
-// client batches anyway. So what arrives out of order is whole chunks, and
-// putting them back in order is a map keyed by each chunk's first block rather
-// than a sliding window over every block in flight.
+// Workers fetch contiguous ranges instead of single blocks, because the RPC
+// client batches anyway. So what arrives out of order is whole chunks. Putting
+// them back in order is then a map keyed by each chunk's first block, not a
+// sliding window over every block in flight.
 //
 // Nothing here does I/O, takes a lock or starts a goroutine. That is the point:
 // ordering is the property most likely to break under concurrency, so it lives
@@ -24,10 +24,9 @@ func newSequencer(from uint64) *sequencer {
 // add takes a fetched chunk and returns every chunk that is now contiguous with
 // what has already been released, in order.
 //
-// It returns nothing while a gap remains. That is the whole contract: a chunk is
-// released only once every block before it has been, so a consumer of add can
-// treat what it receives as the definitive order without knowing that anything
-// was ever concurrent.
+// It returns nothing while a gap remains. A chunk is released only after every
+// block before it. That is the whole contract: a caller can treat what it gets as
+// the final order, without knowing anything was ever concurrent.
 func (s *sequencer) add(blocks []*ethrpc.Block) [][]*ethrpc.Block {
 	if len(blocks) == 0 {
 		return nil

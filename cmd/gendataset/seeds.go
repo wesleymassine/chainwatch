@@ -1,9 +1,10 @@
 package main
 
-// Seed addresses: real wallets that were demonstrably active when this list was
-// built. They exist so that a demo run against a live chain emits events within
-// seconds — 500k random addresses would be realistic but would never match, and
-// a monitor that prints nothing looks broken rather than correct.
+// Seed addresses: real wallets that were active when this list was built.
+//
+// They exist so a demo against a live chain emits events within seconds. 500k
+// random addresses would be realistic but would never match anything, and a
+// monitor that prints nothing looks broken even when it is correct.
 //
 // Every entry was verified by scanning recent blocks and counting how many
 // transactions touched it, then confirming with eth_getCode that it is an

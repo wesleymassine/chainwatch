@@ -33,10 +33,10 @@ type Options struct {
 	ConfirmDepth uint64
 }
 
-// How far to go back when the chain turns out not to link up. Reorgs on
-// mainnet are one or two blocks deep and ConfirmDepth already absorbs those, so
-// this only runs for something unusual — and going back further than necessary
-// costs duplicates, which at-least-once permits, rather than correctness.
+// How far to go back when the chain does not link up. Mainnet reorgs are one or
+// two blocks deep and ConfirmDepth already absorbs those, so this only runs for
+// something unusual. Going back too far costs duplicates, which at-least-once
+// permits, not correctness.
 const rewindDepth = 16
 
 // How long the checkpoint save is allowed to outlive a shutdown. See publish.
@@ -176,8 +176,8 @@ func rewind(from, depth uint64) uint64 {
 
 // resume decides which block to start from.
 //
-// A stored checkpoint always wins over configuration. START_BLOCK says where to
-// begin when there is nothing to resume; obeying it on a restart would replay
+// A stored checkpoint always wins over configuration. START_BLOCK only says where
+// to begin when there is nothing to resume. Obeying it on a restart would replay
 // from the wrong place, or worse, jump to the head and skip everything in
 // between.
 func (p *Pipeline) resume(ctx context.Context, fallback uint64) (uint64, error) {
@@ -189,10 +189,9 @@ func (p *Pipeline) resume(ctx context.Context, fallback uint64) (uint64, error) 
 		p.log.Info("no checkpoint found, starting fresh", "from", fallback)
 		return fallback, nil
 	}
-	// This is what the stored hash is for. Restoring it means the first block
-	// fetched after a restart is checked against the last one published before
-	// it, so a reorg that happened while the service was down is caught rather
-	// than assumed away.
+	// This is what the stored hash is for. The first block fetched after a restart
+	// is checked against the last one published before it, so a reorg that
+	// happened while the service was down is caught instead of assumed away.
 	p.lastHash = cp.Hash
 	p.log.Info("resuming from checkpoint", "block", cp.Block, "hash", cp.Hash, "from", cp.Block+1)
 	return cp.Block + 1, nil
@@ -262,9 +261,9 @@ func (p *Pipeline) catchUp(parent context.Context, from, to uint64) error {
 	if err := parent.Err(); err != nil {
 		return err
 	}
-	// Nothing above should be able to end the loop with blocks unreleased, but
-	// this is the invariant the whole service rests on: finishing quietly while
-	// holding a gap would look exactly like success.
+	// Nothing above should end the loop with blocks unreleased. But this is the
+	// invariant the whole service rests on, and finishing quietly while holding a
+	// gap would look exactly like success.
 	if seq.awaiting() != to+1 {
 		return fmt.Errorf("stopped at block %d with %d chunks held, expected to reach %d",
 			seq.awaiting(), seq.held(), to+1)
@@ -330,10 +329,9 @@ func (p *Pipeline) publish(ctx context.Context, blocks []*ethrpc.Block) error {
 	if err := p.publisher.Publish(ctx, events); err != nil {
 		return fmt.Errorf("publishing blocks %d-%d: %w", first.Number, last.Number, err)
 	}
-	// The broker has the events now. Recording that must not be abandoned just
-	// because a shutdown started a moment ago, so the save gets its own context:
-	// giving up here would republish this whole chunk on the next start, which
-	// is a duplicate we chose to make rather than one we could not avoid.
+	// The broker has the events now. Recording that must not be given up just
+	// because a shutdown started. Otherwise the next start republishes this whole
+	// chunk: a duplicate we chose to make, not one we could not avoid.
 	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), checkpointGrace)
 	defer cancel()
 	if err := p.checkpoint.Save(saveCtx, checkpoint.Checkpoint{Block: last.Number, Hash: last.Hash}); err != nil {

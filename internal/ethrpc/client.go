@@ -28,9 +28,9 @@ type Client struct {
 	log  *slog.Logger
 
 	agent string
-	// Kept on the client rather than as a constant so tests can shorten it:
-	// proving that rate limiting is retried past the failure budget otherwise
-	// means a test that really waits several seconds.
+	// Kept on the client, not as a constant, so tests can shorten it. Otherwise
+	// proving that rate limiting is retried past the failure budget means a test
+	// that really waits several seconds.
 	backoffBase time.Duration
 }
 
@@ -128,9 +128,9 @@ func (c *Client) Blocks(ctx context.Context, numbers []uint64) ([]*Block, error)
 			n := pending[r.ID]
 			if r.Error != nil {
 				// The size cap has two faces. Sometimes the endpoint truncates
-				// the batch silently, which the loop below recovers from;
-				// sometimes it says so, and then the batch is simply too big to
-				// ever succeed and only a smaller one will.
+				// the batch silently, which the loop below recovers from.
+				// Sometimes it says so, and then no retry helps: only a
+				// smaller batch will.
 				if strings.Contains(strings.ToLower(r.Error.Message), "too large") {
 					return nil, fmt.Errorf("blocks %d-%d exceed the endpoint's response limit, lower BATCH_SIZE: %w",
 						pending[0], pending[len(pending)-1], r.Error)

@@ -61,12 +61,11 @@ func (k *Kafka) Publish(ctx context.Context, events []matcher.Event) error {
 	// synchronous wait is deliberate: it is what makes "published" mean
 	// "durable" to the caller, and what the checkpoint depends on.
 	//
-	// The broker is never asked to create the topic implicitly. EnsureTopics
-	// has already made it with the configuration this service depends on, and a
-	// topic conjured up on first produce would come back with server defaults
-	// instead — retention rather than compaction on the checkpoint topic, which
-	// would leave the checkpoint free to be deleted. So a missing topic here
-	// means something removed it underneath us, and that is worth saying.
+	// The broker is never asked to create the topic. EnsureTopics already made it
+	// with the configuration this service needs. A topic created on first produce
+	// gets server defaults instead, which on the checkpoint topic means retention
+	// rather than compaction, and retention is free to delete it. So a missing
+	// topic here means something removed it, and that is worth saying.
 	if err := k.client.ProduceSync(ctx, records...).FirstErr(); err != nil {
 		if errors.Is(err, kerr.UnknownTopicOrPartition) {
 			return fmt.Errorf("topic %q vanished after startup: %w", k.topic, err)
