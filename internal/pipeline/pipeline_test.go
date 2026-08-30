@@ -554,3 +554,44 @@ func TestCheckpointSurvivesShutdownAfterPublish(t *testing.T) {
 		t.Errorf("checkpoint = block %d, want 104 — the chunk that was acknowledged", saved[len(saved)-1].Block)
 	}
 }
+
+// What /metrics reports has to be what actually happened, and the lag has to
+// account for the blocks deliberately left alone near the head.
+func TestStatsCountWhatWasProcessed(t *testing.T) {
+	n := &node{head: 120, watchedIn: watchedRange(100, 118)}
+	fake := publisher.NewFake()
+	p, _ := newPipeline(t, n, fake, Options{Poll: time.Hour, Workers: 1, BatchSize: 5, ConfirmDepth: 2})
+
+	if got := p.Stats(); got.Blocks != 0 || got.Lag != 0 {
+		t.Fatalf("before running, Stats() = %+v, want zeroes", got)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- p.Run(ctx, 100) }()
+	waitFor(t, "the confirmed blocks", func() bool { return p.Stats().Blocks == 19 })
+	cancel()
+	<-done
+
+	got := p.Stats()
+	if got.LastBlock != 118 {
+		t.Errorf("LastBlock = %d, want 118 — the head is 120 with a depth of 2", got.LastBlock)
+	}
+	if got.Head != 120 {
+		t.Errorf("Head = %d, want 120", got.Head)
+	}
+	// Caught up, and the lag is exactly the confirmation delay.
+	if got.Lag != 2 {
+		t.Errorf("Lag = %d, want 2", got.Lag)
+	}
+	if got.Events != uint64(len(fake.Events())) {
+		t.Errorf("Events = %d, but %d were published", got.Events, len(fake.Events()))
+	}
+	if got.Txs != 19 {
+		t.Errorf("Txs = %d, want 19 — one per block in this fake", got.Txs)
+	}
+	if got.Reorgs != 0 {
+		t.Errorf("Reorgs = %d, want 0", got.Reorgs)
+	}
+}

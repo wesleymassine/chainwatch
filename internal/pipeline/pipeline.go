@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wesleymassine/chainwatch/internal/checkpoint"
@@ -71,6 +72,40 @@ type Pipeline struct {
 	// why it needs no lock. Empty means the link is unknown and the next block
 	// is taken on trust — the first block after a start or a rewind.
 	lastHash string
+
+	// Read by whatever is serving /metrics, so these are atomic.
+	counters struct {
+		blocks, txs, events, reorgs atomic.Uint64
+		lastBlock, head             atomic.Uint64
+	}
+}
+
+// Stats is a snapshot of what the pipeline has done. Lag is the one worth
+// watching: it is how far behind the chain the service is, and a lag that grows
+// steadily is the signal that it has stopped keeping up.
+type Stats struct {
+	Blocks    uint64 `json:"blocksProcessed"`
+	Txs       uint64 `json:"transactionsScanned"`
+	Events    uint64 `json:"eventsPublished"`
+	Reorgs    uint64 `json:"reorgsHandled"`
+	LastBlock uint64 `json:"lastBlock"`
+	Head      uint64 `json:"chainHead"`
+	Lag       uint64 `json:"blocksBehind"`
+}
+
+func (p *Pipeline) Stats() Stats {
+	s := Stats{
+		Blocks:    p.counters.blocks.Load(),
+		Txs:       p.counters.txs.Load(),
+		Events:    p.counters.events.Load(),
+		Reorgs:    p.counters.reorgs.Load(),
+		LastBlock: p.counters.lastBlock.Load(),
+		Head:      p.counters.head.Load(),
+	}
+	if s.Head > s.LastBlock {
+		s.Lag = s.Head - s.LastBlock
+	}
+	return s
 }
 
 func New(c *ethrpc.Client, m *matcher.Matcher, pub publisher.Publisher, cp checkpoint.Store, opts Options, log *slog.Logger) *Pipeline {
@@ -90,6 +125,7 @@ func (p *Pipeline) Run(ctx context.Context, fallback uint64) error {
 		if err != nil {
 			return fmt.Errorf("reading head: %w", err)
 		}
+		p.counters.head.Store(head)
 		// Everything within ConfirmDepth of the head is still liable to change.
 		target := head
 		if target < p.opts.ConfirmDepth {
@@ -103,6 +139,7 @@ func (p *Pipeline) Run(ctx context.Context, fallback uint64) error {
 			var reorg *reorgError
 			if errors.As(err, &reorg) {
 				reorgs++
+				p.counters.reorgs.Add(1)
 				if reorgs > maxConsecutiveReorgs {
 					return fmt.Errorf("chain still not linking up after %d rewinds: %w",
 						maxConsecutiveReorgs, err)
@@ -301,6 +338,10 @@ func (p *Pipeline) publish(ctx context.Context, blocks []*ethrpc.Block) error {
 	}
 
 	p.lastHash = prev
+	p.counters.blocks.Add(uint64(len(blocks)))
+	p.counters.txs.Add(uint64(txs))
+	p.counters.events.Add(uint64(len(events)))
+	p.counters.lastBlock.Store(last.Number)
 	p.log.Info("blocks processed",
 		"from", first.Number, "to", last.Number, "txs", txs, "events", len(events))
 	return nil

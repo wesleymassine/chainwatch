@@ -18,6 +18,7 @@ import (
 	"github.com/wesleymassine/chainwatch/internal/config"
 	"github.com/wesleymassine/chainwatch/internal/ethrpc"
 	"github.com/wesleymassine/chainwatch/internal/matcher"
+	"github.com/wesleymassine/chainwatch/internal/metrics"
 	"github.com/wesleymassine/chainwatch/internal/pipeline"
 	"github.com/wesleymassine/chainwatch/internal/publisher"
 )
@@ -40,6 +41,7 @@ func run(log *slog.Logger) error {
 		brokers     = strings.Split(env("KAFKA_BROKERS", "localhost:9092"), ",")
 		topic       = env("KAFKA_TOPIC", "tx-events")
 		checkpoints = env("KAFKA_CHECKPOINT_TOPIC", "tx-checkpoints")
+		metricsAddr = env("METRICS_ADDR", ":9090")
 		dataset     = env("ADDRESSES_FILE", "testdata/addresses.csv")
 	)
 
@@ -94,12 +96,31 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	p := pipeline.New(client, matcher.New(watched), pub, store, profile.Options, log)
+
+	// Bound before anything starts, so a port that cannot be opened stops the
+	// service now rather than leaving it running and unobservable.
+	server, err := metrics.Listen(metricsAddr, func() any { return p.Stats() }, log)
+	if err != nil {
+		return err
+	}
+
 	log.Info("starting", "chain", profile.Name, "chainId", chainID, "rpc", rpcURL,
 		"topic", topic, "fallback", from, "poll", profile.Poll.String(),
 		"workers", profile.Workers, "batch", profile.BatchSize,
-		"confirmDepth", profile.ConfirmDepth)
+		"confirmDepth", profile.ConfirmDepth, "metrics", server.Addr())
 
-	return pipeline.New(client, matcher.New(watched), pub, store, profile.Options, log).Run(ctx, from)
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	served := make(chan error, 1)
+	go func() { served <- server.Serve(runCtx) }()
+
+	err = p.Run(runCtx, from)
+	cancel()
+	if serveErr := <-served; err == nil {
+		err = serveErr
+	}
+	return err
 }
 
 // startBlock resolves START_BLOCK, which is either "latest" or a block number.
