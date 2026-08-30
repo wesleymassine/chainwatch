@@ -44,6 +44,7 @@ type node struct {
 	forkAt  int  // bump the version once this many blocks have been served
 	chaos   bool // bump on every block, so the chain never settles
 	served  int
+	shift   uint64 // answer with a different block than the one asked for
 }
 
 func (n *node) start(t *testing.T) *ethrpc.Client {
@@ -71,6 +72,7 @@ func (n *node) start(t *testing.T) *ethrpc.Client {
 				var number uint64
 				fmt.Sscanf(req.Params[0].(string), "0x%x", &number)
 				n.mu.Lock()
+				number += n.shift
 				n.served++
 				if n.chaos || (n.forkAt > 0 && n.served == n.forkAt) {
 					n.version++
@@ -593,5 +595,35 @@ func TestStatsCountWhatWasProcessed(t *testing.T) {
 	}
 	if got.Reorgs != 0 {
 		t.Errorf("Reorgs = %d, want 0", got.Reorgs)
+	}
+}
+
+// A node answering with the wrong blocks used to stall the sequencer and report
+// a gap it could not explain. The error should name the node instead.
+func TestNodeAnsweringWithTheWrongBlockIsNamed(t *testing.T) {
+	n := &node{head: 105, watchedIn: watchedRange(100, 105), shift: 3}
+	p, _ := newPipeline(t, n, publisher.NewFake(), Options{Poll: time.Hour, Workers: 1, BatchSize: 2})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := p.Run(ctx, 100)
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if !strings.Contains(err.Error(), "asked for block") {
+		t.Errorf("error = %v, want it to blame the node rather than the sequencer", err)
+	}
+}
+
+// publish is only ever handed chunks the sequencer released, but indexing
+// blocks[0] without a guard is one refactor away from a panic in the hot path.
+func TestPublishIgnoresAnEmptyChunk(t *testing.T) {
+	n := &node{head: 100, watchedIn: watchedRange(100, 100)}
+	p, cp := newPipeline(t, n, publisher.NewFake(), sequential)
+	if err := p.publish(context.Background(), nil); err != nil {
+		t.Fatalf("publish(nil) = %v, want nil", err)
+	}
+	if len(cp.Saved()) != 0 {
+		t.Error("an empty chunk moved the checkpoint")
 	}
 }

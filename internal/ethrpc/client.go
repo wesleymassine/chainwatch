@@ -147,6 +147,11 @@ func (c *Client) Blocks(ctx context.Context, numbers []uint64) ([]*Block, error)
 			if err := json.Unmarshal(r.Result, &b); err != nil {
 				return nil, fmt.Errorf("block %d: %w", n, err)
 			}
+			// Filing it under the number we asked for would hide the mismatch
+			// until the pipeline stalled on a gap it could not explain.
+			if b.Number != n {
+				return nil, fmt.Errorf("asked for block %d, got %d", n, b.Number)
+			}
 			found[n] = &b
 		}
 

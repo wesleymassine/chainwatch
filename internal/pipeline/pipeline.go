@@ -304,6 +304,9 @@ func (p *Pipeline) feed(ctx context.Context, jobs chan<- []uint64, from, to uint
 // must have the same granularity. Paying for twenty acknowledgements to protect
 // a window that is already twenty blocks wide buys nothing but latency.
 func (p *Pipeline) publish(ctx context.Context, blocks []*ethrpc.Block) error {
+	if len(blocks) == 0 {
+		return nil
+	}
 	first, last := blocks[0], blocks[len(blocks)-1]
 
 	// Check the whole chunk links up before publishing any of it. A block whose

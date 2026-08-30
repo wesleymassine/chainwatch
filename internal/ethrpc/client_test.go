@@ -383,3 +383,21 @@ func TestBlocksExplainsAnOversizedBatch(t *testing.T) {
 		t.Errorf("error = %v, want it to name the range that was too big", err)
 	}
 }
+
+// The endpoints are public and we do not control them. A response that carries a
+// different block than was asked for has to say so, rather than being filed
+// under the number we wanted and surfacing later as a gap nobody can explain.
+func TestBlocksRejectsTheWrongBlock(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `[{"id":0,"result":{"number":"0x67","hash":"0xaa","parentHash":"0xbb","transactions":[]}}]`)
+	}))
+	defer srv.Close()
+
+	_, err := New(srv.URL, discardLogger()).Blocks(context.Background(), []uint64{100})
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if !strings.Contains(err.Error(), "asked for block 100, got 103") {
+		t.Errorf("error = %v, want it to name both numbers", err)
+	}
+}

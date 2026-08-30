@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -45,6 +47,48 @@ func TestLogLevel(t *testing.T) {
 	}
 }
 
+// A dataset that loads but holds nothing gives a service that watches nothing
+// and still reports itself healthy. It has to refuse instead.
+func TestLoadWatchedRefusesAnEmptyDataset(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		wantErr string
+	}{
+		{name: "empty file", content: "", wantErr: "no addresses"},
+		{name: "header only", content: "userId,address\n", wantErr: "no addresses"},
+		{name: "one address is enough", content: "1,0x28c6c06298d514db089934071355e5743bf21d60\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "addresses.csv")
+			if err := os.WriteFile(path, []byte(tt.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			set, err := loadWatched(path)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want it to mention %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if set.Len() != 1 {
+				t.Errorf("Len() = %d, want 1", set.Len())
+			}
+		})
+	}
+}
+
+func TestLoadWatchedReportsAMissingFile(t *testing.T) {
+	_, err := loadWatched(filepath.Join(t.TempDir(), "absent.csv"))
+	if err == nil || !strings.Contains(err.Error(), "make dataset") {
+		t.Fatalf("err = %v, want it to point at the fix", err)
+	}
+}
+
 func TestStartBlock(t *testing.T) {
 	const head = 25854432
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -62,6 +106,9 @@ func TestStartBlock(t *testing.T) {
 		{name: "latest asks the node", value: "latest", want: head},
 		{name: "a number is taken as given", value: "1000000", want: 1_000_000},
 		{name: "anything else is refused", value: "yesterday", wantErr: "START_BLOCK"},
+		// Otherwise the service starts, waits for a block years away, and says
+		// nothing at all.
+		{name: "a block past the head is refused", value: "99999999999", wantErr: "ahead of the chain"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

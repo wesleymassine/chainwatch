@@ -45,14 +45,9 @@ func run(log *slog.Logger) error {
 		dataset     = env("ADDRESSES_FILE", "testdata/addresses.csv")
 	)
 
-	file, err := os.Open(dataset)
+	watched, err := loadWatched(dataset)
 	if err != nil {
-		return fmt.Errorf("opening the address dataset (run `make dataset`): %w", err)
-	}
-	watched, err := addresses.Load(file)
-	file.Close()
-	if err != nil {
-		return fmt.Errorf("loading %s: %w", dataset, err)
+		return err
 	}
 	log.Info("loaded watched addresses", "count", watched.Len(), "file", dataset)
 
@@ -123,19 +118,43 @@ func run(log *slog.Logger) error {
 	return err
 }
 
+func loadWatched(path string) (*addresses.Set, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("opening the address dataset (run `make dataset`): %w", err)
+	}
+	defer file.Close()
+
+	watched, err := addresses.Load(file)
+	if err != nil {
+		return nil, fmt.Errorf("loading %s: %w", path, err)
+	}
+	// A truncated or wrong file would otherwise give a service that watches
+	// nothing, publishes nothing, and reports itself healthy.
+	if watched.Len() == 0 {
+		return nil, fmt.Errorf("%s has no addresses: nothing would be watched", path)
+	}
+	return watched, nil
+}
+
 // startBlock resolves START_BLOCK, which is either "latest" or a block number.
 // It is only a fallback: a stored checkpoint takes precedence over it.
 func startBlock(ctx context.Context, client *ethrpc.Client, value string) (uint64, error) {
+	head, err := client.BlockNumber(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("reading head: %w", err)
+	}
 	if value == "latest" {
-		head, err := client.BlockNumber(ctx)
-		if err != nil {
-			return 0, fmt.Errorf("reading head: %w", err)
-		}
 		return head, nil
 	}
 	n, err := strconv.ParseUint(value, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("START_BLOCK must be \"latest\" or a block number: %w", err)
+	}
+	// Without this the service starts, waits for a block that is years away and
+	// says nothing.
+	if n > head {
+		return 0, fmt.Errorf("START_BLOCK %d is ahead of the chain, which is at %d", n, head)
 	}
 	return n, nil
 }
