@@ -12,10 +12,10 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/wesleymassine/chainwatch/internal/addresses"
 	"github.com/wesleymassine/chainwatch/internal/checkpoint"
+	"github.com/wesleymassine/chainwatch/internal/config"
 	"github.com/wesleymassine/chainwatch/internal/ethrpc"
 	"github.com/wesleymassine/chainwatch/internal/matcher"
 	"github.com/wesleymassine/chainwatch/internal/pipeline"
@@ -42,10 +42,6 @@ func run(log *slog.Logger) error {
 		checkpoints = env("KAFKA_CHECKPOINT_TOPIC", "tx-checkpoints")
 		dataset     = env("ADDRESSES_FILE", "testdata/addresses.csv")
 	)
-	opts, err := options()
-	if err != nil {
-		return err
-	}
 
 	file, err := os.Open(dataset)
 	if err != nil {
@@ -80,6 +76,14 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("identifying the chain: %w", err)
 	}
+	profile, err := config.Load(chainID, os.Getenv)
+	if err != nil {
+		return err
+	}
+	if !config.Known(chainID) {
+		log.Warn("no measured profile for this chain, using mainnet settings",
+			"chainId", chainID, "profile", profile.Name)
+	}
 	store, err := checkpoint.NewKafka(brokers, checkpoints, chainID)
 	if err != nil {
 		return err
@@ -90,34 +94,12 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	log.Info("starting", "rpc", rpcURL, "chainId", chainID, "topic", topic, "fallback", from,
-		"poll", opts.Poll.String(), "workers", opts.Workers, "batch", opts.BatchSize,
-		"confirmDepth", opts.ConfirmDepth)
+	log.Info("starting", "chain", profile.Name, "chainId", chainID, "rpc", rpcURL,
+		"topic", topic, "fallback", from, "poll", profile.Poll.String(),
+		"workers", profile.Workers, "batch", profile.BatchSize,
+		"confirmDepth", profile.ConfirmDepth)
 
-	return pipeline.New(client, matcher.New(watched), pub, store, opts, log).Run(ctx, from)
-}
-
-// options reads the tuning knobs. The defaults are the mainnet numbers measured
-// in notes/03-rpc-probe.md: a batch of 20 stays well under the endpoint's 24 MB
-// response cap, and eight workers reach roughly 100 blocks/s during catch-up.
-func options() (pipeline.Options, error) {
-	poll, err := time.ParseDuration(env("POLL_INTERVAL", "3s"))
-	if err != nil {
-		return pipeline.Options{}, fmt.Errorf("POLL_INTERVAL: %w", err)
-	}
-	workers, err := strconv.Atoi(env("WORKERS", "8"))
-	if err != nil || workers < 1 {
-		return pipeline.Options{}, fmt.Errorf("WORKERS must be a positive number, got %q", env("WORKERS", "8"))
-	}
-	batch, err := strconv.Atoi(env("BATCH_SIZE", "20"))
-	if err != nil || batch < 1 {
-		return pipeline.Options{}, fmt.Errorf("BATCH_SIZE must be a positive number, got %q", env("BATCH_SIZE", "20"))
-	}
-	confirm, err := strconv.ParseUint(env("CONFIRM_DEPTH", "2"), 10, 64)
-	if err != nil {
-		return pipeline.Options{}, fmt.Errorf("CONFIRM_DEPTH must be a number, got %q", env("CONFIRM_DEPTH", "2"))
-	}
-	return pipeline.Options{Poll: poll, Workers: workers, BatchSize: batch, ConfirmDepth: confirm}, nil
+	return pipeline.New(client, matcher.New(watched), pub, store, profile.Options, log).Run(ctx, from)
 }
 
 // startBlock resolves START_BLOCK, which is either "latest" or a block number.
