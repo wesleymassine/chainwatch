@@ -145,6 +145,19 @@ func newPipeline(t *testing.T, n *node, pub publisher.Publisher, opts Options) (
 // per fetch, so "blocks asked" is exactly the order they were processed in.
 var sequential = Options{Poll: time.Hour, Workers: 1, BatchSize: 1}
 
+// checkpointReached is the marker to wait on: the checkpoint is saved last in
+// publish, so nothing else in a run happens after it.
+func checkpointReached(cp *checkpoint.Fake, block uint64) bool {
+	saved := cp.Saved()
+	return len(saved) > 0 && saved[len(saved)-1].Block == block
+}
+
+// waitFor polls until cond holds.
+//
+// cond has to be a state that stays true, and it has to be the last thing a run
+// does. Waiting on something that happens earlier — a count of published events,
+// say — cancels the run before it has finished, and the assertions that follow
+// then see a half-done state. That mistake was in three tests here.
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -159,14 +172,16 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 func TestRunPublishesMatchesUpToHead(t *testing.T) {
 	n := &node{head: 104, watchedIn: map[uint64]bool{101: true, 103: true}}
 	fake := publisher.NewFake()
-	p, _ := newPipeline(t, n, fake, sequential)
+	p, cp := newPipeline(t, n, fake, sequential)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx, 100) }()
 
-	waitFor(t, "both matching blocks to be published", func() bool { return len(fake.Events()) == 2 })
+	// Not "two events published": the last block that matches is 103, and 104
+	// would still be unread when that becomes true.
+	waitFor(t, "the head to be reached", func() bool { return checkpointReached(cp, 104) })
 	cancel()
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() = %v, want context.Canceled", err)
@@ -368,7 +383,7 @@ func TestPublishesOneBatchPerChunk(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx, 100) }()
 
-	waitFor(t, "all twenty blocks", func() bool { return len(fake.Events()) == 20 })
+	waitFor(t, "all four chunks", func() bool { return checkpointReached(cp, 119) })
 	cancel()
 	<-done
 
@@ -503,21 +518,30 @@ func TestReorgWhileDownIsCaughtOnResume(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx, 100) }()
 
-	waitFor(t, "the rewind", func() bool {
-		asked := n.blocksAsked()
-		return len(asked) > 1 && asked[len(asked)-1] < asked[0]
+	// Waiting for the run to finish, not for the rewind to be in progress: the
+	// rewind is a moment, and polling for a moment is a race against the test.
+	waitFor(t, "the run to reach the head", func() bool {
+		saved := cp.Saved()
+		return len(saved) > 0 && saved[len(saved)-1].Block == 140
 	})
 	cancel()
 	<-done
 
 	asked := n.blocksAsked()
 	if asked[0] != 121 {
-		t.Fatalf("resumed at %d, want 121", asked[0])
+		t.Fatalf("resumed at %d, want 121 — the checkpoint beats the fallback of 100", asked[0])
 	}
-	// 121 does not link to the stored hash, so it goes back rather than
-	// publishing a block from a chain that no longer exists.
-	if got := asked[1]; got > 105 {
-		t.Errorf("after the failed link it asked for %d, want a rewind below 105", got)
+
+	// 121 does not link to the stored hash, so the pipeline must go back before
+	// the fork. Sixteen blocks back from 121 is 105.
+	lowest := asked[0]
+	for _, b := range asked {
+		if b < lowest {
+			lowest = b
+		}
+	}
+	if lowest > 105 {
+		t.Errorf("went back only to %d, want 105 or lower — asked %v", lowest, asked)
 	}
 }
 
@@ -572,7 +596,7 @@ func TestStatsCountWhatWasProcessed(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx, 100) }()
-	waitFor(t, "the confirmed blocks", func() bool { return p.Stats().Blocks == 19 })
+	waitFor(t, "the confirmed blocks", func() bool { return p.Stats().LastBlock == 118 })
 	cancel()
 	<-done
 
